@@ -13,6 +13,20 @@ import egomimic.utils.tensor_utils as TensorUtils
 from egomimic.rldb.zarr.utils import DataSchematic
 
 
+def _barrier_if_distributed(rank: int, label: str) -> None:
+    if not torch.distributed.is_available() or not torch.distributed.is_initialized():
+        return
+    print(
+        f"Rank {rank} on {label}, waiting for all ranks to synchronize",
+        flush=True,
+    )
+    torch.distributed.barrier()
+    print(
+        f"Rank {rank} on {label}, all ranks synchronized",
+        flush=True,
+    )
+
+
 class ModelWrapper(LightningModule):
     """
     Wrapper class around robomimic models to ensure compatibility with Pytorch Lightning.
@@ -210,29 +224,29 @@ class ModelWrapper(LightningModule):
         """
         Run a validation step on the batch, and save that batch of images into the val_image_buffer.  Once the buffer hits 1000 images, save that as a 30fps video using torchvision.io.write_video.
         """
-        if self.evaluator is None:
-            return
         batch = self.model.process_batch_for_training(batch)
-        print(
-            f"[VAL_STEP] rank={self.global_rank}, batch_idx={batch_idx}",
-            flush=True,
-        )
-        self.evaluator.on_validation_step(batch, batch_idx, dataloader_idx)
+        predictions = self.model.forward_training(batch)
+        losses = self.model.compute_losses(predictions, batch)
+
+        info = {"losses": TensorUtils.detach(losses)}
+        for k, v in self.model.log_info(info).items():
+            self.log("Val/" + k, v, sync_dist=True, on_step=False, on_epoch=True)
+
+        if self.evaluator is not None:
+            print(
+                f"[VAL_STEP] rank={self.global_rank}, batch_idx={batch_idx}",
+                flush=True,
+            )
+            self.evaluator.on_validation_step(batch, batch_idx, dataloader_idx)
+
+        return losses["action_loss"]
 
     def on_validation_end(self):
         print(f"[ON_VALIDATION_END] rank={self.global_rank}", flush=True)
         if self.evaluator is not None:
             self.evaluator.on_validation_end()
 
-        print(
-            f"Rank {self.global_rank} on validation end, waiting for all ranks to synchronize",
-            flush=True,
-        )
-        torch.distributed.barrier()
-        print(
-            f"Rank {self.global_rank} on validation end, all ranks synchronized",
-            flush=True,
-        )
+        _barrier_if_distributed(self.global_rank, "validation end")
 
     def configure_optimizers(self) -> Dict[str, Any]:
         """Choose what optimizers and learning-rate schedulers to use in your optimization.
@@ -283,14 +297,7 @@ class ModelWrapper(LightningModule):
 
     def on_fit_start(self):
         self.model.device = self.device
-        print(
-            f"Rank {self.global_rank} on fit start, waiting for all ranks to synchronize",
-            flush=True,
-        )
-        torch.distributed.barrier()
-        print(
-            f"Rank {self.global_rank} on fit start, all ranks synchronized", flush=True
-        )
+        _barrier_if_distributed(self.global_rank, "fit start")
 
     def on_train_epoch_start(self):
         for i, param_group in enumerate(self.optimizers().param_groups):

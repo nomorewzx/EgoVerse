@@ -918,6 +918,15 @@ class HPT(Algo):
         model.depth = self.depth
 
         self.rkl_samples = kwargs.get("reverse_kl_samples", 4)
+        self.domain_loss_weights = {
+            domain: float(weight)
+            for domain, weight in kwargs.get("domain_loss_weights", {}).items()
+        }
+        for domain, weight in self.domain_loss_weights.items():
+            if weight < 0.0:
+                raise ValueError(
+                    f"domain_loss_weights['{domain}'] must be non-negative, got {weight}"
+                )
 
         if self.ot:
             self.ot_warm_start_steps = kwargs.get("ot_warm_start_steps", 0)
@@ -1306,7 +1315,8 @@ class HPT(Algo):
         for embodiment_id, _batch in batch.items():
             embodiment_name = get_embodiment(embodiment_id).lower()
             bc_loss = predictions[f"{embodiment_name}_loss"]
-            scaled_bc_loss = bc_weight * bc_loss
+            domain_weight = self.domain_loss_weights.get(embodiment_name, 1.0)
+            scaled_bc_loss = bc_weight * domain_weight * bc_loss
             total_action_loss += scaled_bc_loss
             loss_dict[f"{embodiment_name}_loss"] = bc_loss  # for logging
 
@@ -1315,7 +1325,14 @@ class HPT(Algo):
             loss_dict["avg_feature_distance"] = predictions["avg_feature_distance"]
             total_action_loss += ot_weight * self.temperature * predictions["ot_loss"]
 
-        loss_dict["action_loss"] = total_action_loss / len(self.domains)
+        domain_weight_sum = 0.0
+        for embodiment_id in batch:
+            embodiment_name = get_embodiment(embodiment_id).lower()
+            domain_weight_sum += self.domain_loss_weights.get(embodiment_name, 1.0)
+        if domain_weight_sum <= 0.0:
+            raise ValueError("Sum of domain loss weights must be positive")
+
+        loss_dict["action_loss"] = total_action_loss / domain_weight_sum
         return loss_dict
 
     @override

@@ -33,6 +33,9 @@ class EMBODIMENT(Enum):
     SCALE_RIGHT_ARM = 13
     SCALE_LEFT_ARM = 14
     SO100_SINGLEARM = 15
+    EGO_VIEW_RIGHT_ARM = 16
+    EGO_VIEW_LEFT_ARM = 17
+    EGO_VIEW_BIMANUAL = 18
 
 
 EMBODIMENT_ID_TO_KEY = {member.value: member.name for member in EMBODIMENT}
