@@ -1,0 +1,1075 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>HPT Base Rollout 实验对比报告</title>
+  <style>
+    :root {
+      --bg: #f6f7f9;
+      --panel: #ffffff;
+      --ink: #18202a;
+      --muted: #64707d;
+      --line: #dce2e8;
+      --blue: #2563eb;
+      --cyan: #0891b2;
+      --green: #16a34a;
+      --amber: #d97706;
+      --red: #dc2626;
+      --violet: #7c3aed;
+      --soft-blue: #eaf1ff;
+      --soft-green: #eaf8ef;
+      --soft-amber: #fff4df;
+      --soft-red: #ffecec;
+      --shadow: 0 14px 34px rgba(18, 32, 46, 0.08);
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      color: var(--ink);
+      background:
+        linear-gradient(180deg, #eef3f8 0, var(--bg) 310px),
+        var(--bg);
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      line-height: 1.55;
+    }
+
+    .page {
+      width: min(1180px, calc(100% - 32px));
+      margin: 0 auto;
+      padding: 28px 0 56px;
+    }
+
+    header {
+      display: grid;
+      grid-template-columns: 1.5fr 1fr;
+      gap: 28px;
+      align-items: end;
+      padding: 24px 0 18px;
+    }
+
+    h1,
+    h2,
+    h3,
+    p {
+      margin: 0;
+    }
+
+    h1 {
+      max-width: 820px;
+      font-size: clamp(30px, 4vw, 54px);
+      line-height: 1.06;
+      letter-spacing: 0;
+    }
+
+    h2 {
+      font-size: 24px;
+      line-height: 1.2;
+      margin-bottom: 14px;
+    }
+
+    h3 {
+      font-size: 17px;
+      line-height: 1.25;
+    }
+
+    .subtitle {
+      margin-top: 16px;
+      color: var(--muted);
+      font-size: 16px;
+      max-width: 780px;
+    }
+
+    .meta {
+      display: grid;
+      gap: 10px;
+      color: var(--muted);
+      font-size: 14px;
+      justify-self: end;
+      width: min(360px, 100%);
+    }
+
+    .meta span {
+      display: flex;
+      justify-content: space-between;
+      gap: 20px;
+      padding: 10px 12px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: rgba(255, 255, 255, 0.7);
+    }
+
+    .meta strong {
+      color: var(--ink);
+      font-weight: 700;
+      white-space: nowrap;
+    }
+
+    .section {
+      margin-top: 28px;
+    }
+
+    .grid {
+      display: grid;
+      gap: 16px;
+    }
+
+    .kpi-grid {
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+    }
+
+    .card {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      box-shadow: var(--shadow);
+    }
+
+    .kpi {
+      padding: 18px;
+      min-height: 142px;
+      display: flex;
+      flex-direction: column;
+      justify-content: space-between;
+    }
+
+    .kpi .label {
+      color: var(--muted);
+      font-size: 13px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+    }
+
+    .kpi .value {
+      font-size: 34px;
+      line-height: 1;
+      font-weight: 800;
+      margin-top: 18px;
+    }
+
+    .kpi .note {
+      margin-top: 10px;
+      color: var(--muted);
+      font-size: 13px;
+    }
+
+    .panel {
+      padding: 22px;
+    }
+
+    .chart {
+      display: grid;
+      gap: 14px;
+      margin-top: 18px;
+    }
+
+    .bar-row {
+      display: grid;
+      grid-template-columns: minmax(230px, 300px) 1fr 74px;
+      gap: 14px;
+      align-items: center;
+      min-height: 34px;
+    }
+
+    .bar-label {
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+      min-width: 0;
+    }
+
+    .bar-label strong {
+      font-size: 14px;
+      overflow-wrap: anywhere;
+    }
+
+    .bar-label span {
+      color: var(--muted);
+      font-size: 12px;
+    }
+
+    .track {
+      height: 18px;
+      border-radius: 999px;
+      background: #edf1f5;
+      overflow: hidden;
+      border: 1px solid #e1e7ee;
+    }
+
+    .fill {
+      height: 100%;
+      border-radius: 999px;
+      background: linear-gradient(90deg, var(--blue), var(--cyan));
+    }
+
+    .fill.warn {
+      background: linear-gradient(90deg, var(--amber), #f59e0b);
+    }
+
+    .fill.bad {
+      background: linear-gradient(90deg, var(--red), #f97316);
+    }
+
+    .fill.good {
+      background: linear-gradient(90deg, var(--green), #22c55e);
+    }
+
+    .bar-value {
+      font-weight: 800;
+      text-align: right;
+      font-variant-numeric: tabular-nums;
+    }
+
+    .experiments {
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+
+    .experiment {
+      padding: 18px;
+      display: grid;
+      gap: 14px;
+    }
+
+    .experiment-head {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 14px;
+    }
+
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 28px;
+      padding: 4px 10px;
+      border-radius: 999px;
+      font-size: 12px;
+      font-weight: 800;
+      white-space: nowrap;
+      border: 1px solid transparent;
+    }
+
+    .badge.good {
+      color: #0f6b2e;
+      background: var(--soft-green);
+      border-color: #bbe8ca;
+    }
+
+    .badge.warn {
+      color: #8a5200;
+      background: var(--soft-amber);
+      border-color: #f5d79a;
+    }
+
+    .badge.bad {
+      color: #a31d1d;
+      background: var(--soft-red);
+      border-color: #ffc9c9;
+    }
+
+    .badge.info {
+      color: #184aa5;
+      background: var(--soft-blue);
+      border-color: #c7d7ff;
+    }
+
+    .metrics {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 10px;
+    }
+
+    .metric {
+      padding: 10px;
+      border-radius: 8px;
+      border: 1px solid var(--line);
+      background: #fbfcfd;
+    }
+
+    .metric span {
+      display: block;
+      color: var(--muted);
+      font-size: 12px;
+    }
+
+    .metric strong {
+      display: block;
+      margin-top: 4px;
+      font-size: 18px;
+      font-variant-numeric: tabular-nums;
+    }
+
+    .bullets {
+      margin: 0;
+      padding-left: 18px;
+      color: #334155;
+    }
+
+    .bullets li {
+      margin: 7px 0;
+    }
+
+    .matrix {
+      overflow-x: auto;
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      min-width: 880px;
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      overflow: hidden;
+    }
+
+    th,
+    td {
+      padding: 12px 14px;
+      border-bottom: 1px solid var(--line);
+      text-align: left;
+      vertical-align: top;
+      font-size: 14px;
+    }
+
+    th {
+      background: #eef3f8;
+      color: #314052;
+      font-size: 12px;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+    }
+
+    tr:last-child td {
+      border-bottom: 0;
+    }
+
+    .severity {
+      display: inline-flex;
+      width: 82px;
+      justify-content: center;
+      padding: 3px 8px;
+      border-radius: 999px;
+      font-size: 12px;
+      font-weight: 800;
+    }
+
+    .severity.high {
+      color: #991b1b;
+      background: #fee2e2;
+    }
+
+    .severity.mid {
+      color: #92400e;
+      background: #fef3c7;
+    }
+
+    .severity.low {
+      color: #166534;
+      background: #dcfce7;
+    }
+
+    .insights {
+      grid-template-columns: 1.1fr 0.9fr;
+      align-items: start;
+    }
+
+    .timeline {
+      display: grid;
+      gap: 12px;
+      position: relative;
+      margin-top: 6px;
+    }
+
+    .step {
+      display: grid;
+      grid-template-columns: 36px 1fr;
+      gap: 12px;
+      align-items: start;
+    }
+
+    .dot {
+      width: 28px;
+      height: 28px;
+      border-radius: 50%;
+      display: grid;
+      place-items: center;
+      color: #fff;
+      font-size: 13px;
+      font-weight: 800;
+      background: var(--blue);
+      margin-top: 2px;
+    }
+
+    .step:nth-child(2) .dot {
+      background: var(--red);
+    }
+
+    .step:nth-child(3) .dot {
+      background: var(--amber);
+    }
+
+    .step:nth-child(4) .dot {
+      background: var(--green);
+    }
+
+    .step-text {
+      padding-bottom: 10px;
+      border-bottom: 1px solid var(--line);
+    }
+
+    .step:last-child .step-text {
+      border-bottom: 0;
+      padding-bottom: 0;
+    }
+
+    .step-text strong {
+      display: block;
+      margin-bottom: 3px;
+    }
+
+    .step-text span {
+      color: var(--muted);
+      font-size: 14px;
+    }
+
+    .callout {
+      border-left: 5px solid var(--amber);
+      background: #fff8ea;
+      padding: 16px 18px;
+      border-radius: 8px;
+      color: #5f4107;
+    }
+
+    .recommendations {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 14px;
+      counter-reset: rec;
+    }
+
+    .rec {
+      padding: 18px;
+      position: relative;
+    }
+
+    .rec::before {
+      counter-increment: rec;
+      content: counter(rec);
+      width: 28px;
+      height: 28px;
+      display: grid;
+      place-items: center;
+      border-radius: 50%;
+      background: var(--ink);
+      color: #fff;
+      font-weight: 800;
+      font-size: 13px;
+      margin-bottom: 14px;
+    }
+
+    .rec p {
+      color: var(--muted);
+      font-size: 14px;
+      margin-top: 8px;
+    }
+
+    .note-grid {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 12px;
+      margin-top: 16px;
+    }
+
+    .note-card {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #fbfcfd;
+      padding: 14px;
+    }
+
+    .note-card strong {
+      display: block;
+      font-size: 22px;
+      line-height: 1;
+      margin-bottom: 8px;
+      font-variant-numeric: tabular-nums;
+    }
+
+    .note-card span {
+      color: var(--muted);
+      font-size: 13px;
+    }
+
+    footer {
+      margin-top: 34px;
+      color: var(--muted);
+      font-size: 13px;
+      text-align: center;
+    }
+
+    @media (max-width: 960px) {
+      header,
+      .insights,
+      .experiments {
+        grid-template-columns: 1fr;
+      }
+
+      .meta {
+        justify-self: stretch;
+      }
+
+      .kpi-grid,
+      .recommendations {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+      }
+
+      .bar-row {
+        grid-template-columns: 1fr;
+        gap: 6px;
+      }
+
+      .bar-value {
+        text-align: left;
+      }
+    }
+
+    @media (max-width: 640px) {
+      .page {
+        width: min(100% - 20px, 1180px);
+        padding-top: 16px;
+      }
+
+      .kpi-grid,
+      .recommendations,
+      .metrics,
+      .note-grid {
+        grid-template-columns: 1fr;
+      }
+
+      .panel,
+      .experiment,
+      .rec {
+        padding: 16px;
+      }
+
+      h1 {
+        font-size: 32px;
+      }
+    }
+  </style>
+</head>
+<body>
+  <main class="page">
+    <header>
+      <div>
+        <h1>HPT Base + SO100 / Human 数据 Rollout 对比</h1>
+        <p class="subtitle">
+          基于已完成的 HPT Base 模型 rollout 记录，汇总不同数据配方下的成功率、稳定性、失败模式和后续数据采集重点。
+        </p>
+      </div>
+      <div class="meta" aria-label="report metadata">
+        <span><strong>报告日期</strong>2026-05-10</span>
+        <span><strong>任务</strong>SO100 apricot pick-place</span>
+        <span><strong>基础模型</strong>HPT Base</span>
+        <span><strong>备注</strong>Part 1 + Part 2 中有重复记录需核对</span>
+      </div>
+    </header>
+
+    <section class="section grid kpi-grid" aria-label="summary metrics">
+      <article class="card kpi">
+        <div>
+          <div class="label">最佳完整表现</div>
+          <div class="value">7/7</div>
+        </div>
+        <p class="note">SO100 + Human Part 1 + Part 2，80k 后续记录中出现一次完整成功。</p>
+      </article>
+      <article class="card kpi">
+        <div>
+          <div class="label">SO100 only 平均</div>
+          <div class="value">50.0%</div>
+        </div>
+        <p class="note">21/42，基础 pick-place 能力较强，但对扰动恢复不足。</p>
+      </article>
+      <article class="card kpi">
+        <div>
+          <div class="label">Part 1 后最低</div>
+          <div class="value">3.6%</div>
+        </div>
+        <p class="note">80k 为 1/28，表现出 gripper close 过早和空 place。</p>
+      </article>
+      <article class="card kpi">
+        <div>
+          <div class="label">Part 1-3 平均</div>
+          <div class="value">45.5%</div>
+        </div>
+        <p class="note">25/55，恢复到接近 SO100 only，并出现更多 6/7、4/6。</p>
+      </article>
+    </section>
+
+    <section class="section card panel">
+      <h2>人工介入统计口径</h2>
+      <p class="subtitle">
+        本报告将人工介入拆成两类：物理辅助是指人工移动 apricot、把 apricot 放到 gripper 区域等会改变任务状态的干预；人工停止是指手动中断或停止 rollout，不计入物理辅助。
+      </p>
+      <div class="note-grid">
+        <div class="note-card">
+          <strong>3 次</strong>
+          <span>可确认的物理辅助总次数：SO100 only 2 次，Human Part 1-3 1 次。</span>
+        </div>
+        <div class="note-card">
+          <strong>5+ 次</strong>
+          <span>可确认的人工停止 / 中断次数；部分记录只写“停止”，未全部计入精确值。</span>
+        </div>
+        <div class="note-card">
+          <strong>1 次</strong>
+          <span>完整 7/7 rollout，且记录中明确说明过程中没有误碰任何 apricot，也没有人工辅助。</span>
+        </div>
+      </div>
+    </section>
+
+    <section class="section card panel">
+      <h2>成功率对比</h2>
+      <p class="subtitle">
+        这里将每组 rollout 统一换算为成功 apricot 数 / 总 apricot 数。Human Part 1 + Part 2 的前两段记录与 Human Part 1 完全一致，未纳入柱状图平均。
+      </p>
+      <div class="chart" aria-label="success rate chart">
+        <div class="bar-row">
+          <div class="bar-label"><strong>SO100 only</strong><span>6 rollouts, 21/42</span></div>
+          <div class="track"><div class="fill good" style="width: 50%"></div></div>
+          <div class="bar-value">50.0%</div>
+        </div>
+        <div class="bar-row">
+          <div class="bar-label"><strong>SO100 + Human Part 1, 40k</strong><span>5 rollouts, 3/35</span></div>
+          <div class="track"><div class="fill bad" style="width: 8.6%"></div></div>
+          <div class="bar-value">8.6%</div>
+        </div>
+        <div class="bar-row">
+          <div class="bar-label"><strong>SO100 + Human Part 1, 80k</strong><span>4 rollouts, 1/28</span></div>
+          <div class="track"><div class="fill bad" style="width: 3.6%"></div></div>
+          <div class="bar-value">3.6%</div>
+        </div>
+        <div class="bar-row">
+          <div class="bar-label"><strong>SO100 + Human Part 1 + Part 2, 80k 后续</strong><span>6 rollouts, 14/42</span></div>
+          <div class="track"><div class="fill warn" style="width: 33.3%"></div></div>
+          <div class="bar-value">33.3%</div>
+        </div>
+        <div class="bar-row">
+          <div class="bar-label"><strong>SO100 + Human Part 1 + Part 2 + Part 3, 80k</strong><span>8 rollouts, 25/55</span></div>
+          <div class="track"><div class="fill good" style="width: 45.5%"></div></div>
+          <div class="bar-value">45.5%</div>
+        </div>
+      </div>
+    </section>
+
+    <section class="section grid experiments" aria-label="experiment cards">
+      <article class="card experiment">
+        <div class="experiment-head">
+          <div>
+            <h3>SO100 only</h3>
+            <p class="subtitle">63 episodes，47min，train/val 90:10</p>
+          </div>
+          <span class="badge good">基础能力强</span>
+        </div>
+        <div class="metrics">
+          <div class="metric"><span>Rollouts</span><strong>6</strong></div>
+          <div class="metric"><span>成功数</span><strong>21/42</strong></div>
+          <div class="metric"><span>物理辅助</span><strong>2 次</strong></div>
+        </div>
+        <ul class="bullets">
+          <li>在接近训练分布的布局中可以连续完成多个 pick-place。</li>
+          <li>Rollout 1 与 Rollout 3 均出现人工把 apricot 放入或放到 gripper 区域的辅助。</li>
+          <li>对右上角、桌面边缘、滚动后目标的处理不稳定。</li>
+          <li>常见崩溃形态是原地微调、反复 open/close、在旧目标位置继续抓取。</li>
+        </ul>
+      </article>
+
+      <article class="card experiment">
+        <div class="experiment-head">
+          <div>
+            <h3>SO100 + Human Part 1</h3>
+            <p class="subtitle">Human Part 1: 10.87min</p>
+          </div>
+          <span class="badge bad">明显退化</span>
+        </div>
+        <div class="metrics">
+          <div class="metric"><span>40k</span><strong>3/35</strong></div>
+          <div class="metric"><span>80k</span><strong>1/28</strong></div>
+          <div class="metric"><span>物理辅助</span><strong>0 次</strong></div>
+        </div>
+        <ul class="bullets">
+          <li>gripper 经常尚未到达抓取位姿就 close，导致 miss。</li>
+          <li>miss 后仍进入 basket place 动作，出现 pick 空气 / place 空气。</li>
+          <li>80k 没有修复核心问题，初始直接 place 和空白区域 stuck 仍存在。</li>
+        </ul>
+      </article>
+
+      <article class="card experiment">
+        <div class="experiment-head">
+          <div>
+            <h3>SO100 + Human Part 1 + Part 2</h3>
+            <p class="subtitle">Human total: 29.52min</p>
+          </div>
+          <span class="badge warn">高方差改善</span>
+        </div>
+        <div class="metrics">
+          <div class="metric"><span>后续 80k</span><strong>14/42</strong></div>
+          <div class="metric"><span>最佳</span><strong>7/7</strong></div>
+          <div class="metric"><span>物理辅助</span><strong>0 次</strong></div>
+        </div>
+        <ul class="bullets">
+          <li>第一次出现无误碰的完整成功 rollout。</li>
+          <li>同时存在 0/7、1/7，说明策略分布仍然不稳定。</li>
+          <li>失败集中在 side contact、目标滚到 base 附近、空白区停滞。</li>
+        </ul>
+      </article>
+
+      <article class="card experiment">
+        <div class="experiment-head">
+          <div>
+            <h3>SO100 + Human Part 1 + Part 2 + Part 3</h3>
+            <p class="subtitle">Human total: 46.48min</p>
+          </div>
+          <span class="badge info">稳定性回升</span>
+        </div>
+        <div class="metrics">
+          <div class="metric"><span>80k</span><strong>25/55</strong></div>
+          <div class="metric"><span>平均</span><strong>45.5%</strong></div>
+          <div class="metric"><span>物理辅助</span><strong>1 次</strong></div>
+        </div>
+        <ul class="bullets">
+          <li>出现多次接近完成任务的 rollout，例如 6/7、6/7、4/6。</li>
+          <li>Rollout 4 有一次人工把 apricot 放入 gripper 区域的辅助，该局 6/7 不应视为纯自主 6/7。</li>
+          <li>部分失败后能短暂停留再重新寻找目标，恢复能力有所增强。</li>
+          <li>仍会因 side contact、目标聚集、空白区域循环而失败。</li>
+        </ul>
+      </article>
+    </section>
+
+    <section class="section grid insights">
+      <article class="card panel">
+        <h2>跨实验趋势</h2>
+        <div class="timeline">
+          <div class="step">
+            <div class="dot">1</div>
+            <div class="step-text">
+              <strong>SO100 only 学到了基础任务轨迹</strong>
+              <span>能在熟悉布局下连续 pick-place，但失败后重新定位能力弱。</span>
+            </div>
+          </div>
+          <div class="step">
+            <div class="dot">2</div>
+            <div class="step-text">
+              <strong>少量 Human Part 1 引入动作分布冲突</strong>
+              <span>最明显的退化是 close 过早，以及 miss 后直接进入 place 阶段。</span>
+            </div>
+          </div>
+          <div class="step">
+            <div class="dot">3</div>
+            <div class="step-text">
+              <strong>Part 2 开始补充有效行为，但方差很大</strong>
+              <span>完整成功 rollout 表明 human 数据有价值，但策略尚未稳定吸收这些行为。</span>
+            </div>
+          </div>
+          <div class="step">
+            <div class="dot">4</div>
+            <div class="step-text">
+              <strong>Part 3 后恢复到接近 SO100 only</strong>
+              <span>平均成功率回升，并出现更多高成功 rollout，但扰动恢复仍是瓶颈。</span>
+            </div>
+          </div>
+        </div>
+      </article>
+
+      <article class="card panel">
+        <h2>核心判断</h2>
+        <p>
+          当前模型的主要瓶颈不是标准状态下的单次 pick-place，而是受到扰动后的恢复：miss、side contact、apricot 滚动、目标聚集、进入 base 附近或视野外之后，策略容易进入局部循环。
+        </p>
+        <div style="height: 14px"></div>
+        <div class="callout">
+          <strong>记录核对点：</strong>
+          Human Part 1 + Part 2 中的 40k 和第一段 80k rollout 与 Human Part 1 描述完全一致，建议确认是否为复制记录，避免影响定量结论。
+        </div>
+      </article>
+    </section>
+
+    <section class="section card panel matrix">
+      <h2>失败模式矩阵</h2>
+      <table>
+        <thead>
+          <tr>
+            <th>失败模式</th>
+            <th>严重度</th>
+            <th>主要出现位置</th>
+            <th>表现</th>
+            <th>可能含义</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><strong>Gripper close 过早</strong></td>
+            <td><span class="severity high">高</span></td>
+            <td>Human Part 1, Part 1 + Part 2 早期记录</td>
+            <td>距离 apricot 尚远时 close，导致 miss 或推走目标。</td>
+            <td>gripper timing 或动作分布与 SO100 数据冲突；也可能存在 human 数据延迟或标注质量问题。</td>
+          </tr>
+          <tr>
+            <td><strong>Miss 后直接 place</strong></td>
+            <td><span class="severity high">高</span></td>
+            <td>Human Part 1 40k/80k</td>
+            <td>没有抓住 apricot 仍移动到 basket 上方，形成空抓取、空放置。</td>
+            <td>模型缺少可靠的 grasp success 判断，只按轨迹先验切换阶段。</td>
+          </tr>
+          <tr>
+            <td><strong>Side contact</strong></td>
+            <td><span class="severity high">高</span></td>
+            <td>所有配置，Part 3 仍明显</td>
+            <td>夹爪侧边碰到 apricot，导致其滚到边缘、base 附近或视野外。</td>
+            <td>approach pose 余量不足；对目标中心和夹爪几何关系建模不够稳定。</td>
+          </tr>
+          <tr>
+            <td><strong>目标位移后仍抓旧位置</strong></td>
+            <td><span class="severity mid">中</span></td>
+            <td>SO100 only, Part 1 + Part 2</td>
+            <td>apricot 被推走后，gripper 仍在原位置重复抓取。</td>
+            <td>视觉目标更新或 receding rollout 的状态反馈没有充分改变动作计划。</td>
+          </tr>
+          <tr>
+            <td><strong>OOD 聚集布局 stuck</strong></td>
+            <td><span class="severity mid">中</span></td>
+            <td>SO100 only, Part 3</td>
+            <td>多个 apricot 靠近后，gripper 在 2-3cm 处微调往复。</td>
+            <td>训练数据缺少目标聚集、相互遮挡、碰撞后恢复样本。</td>
+          </tr>
+          <tr>
+            <td><strong>空白区域循环</strong></td>
+            <td><span class="severity mid">中</span></td>
+            <td>Human Part 1, Part 3</td>
+            <td>机械臂在无 apricot 区域微调、静止或重复 pick/place。</td>
+            <td>目标选择不稳定，或者策略进入无目标条件下的动作先验。</td>
+          </tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section class="section card panel matrix">
+      <h2>逐 Rollout 人工介入明细</h2>
+      <p class="subtitle">
+        物理辅助会改变 rollout 中的任务状态；人工停止只表示人工终止评估。下表只统计原始记录中明确出现的介入。
+      </p>
+      <table>
+        <thead>
+          <tr>
+            <th>实验配置</th>
+            <th>Checkpoint</th>
+            <th>Rollout</th>
+            <th>结果</th>
+            <th>物理辅助</th>
+            <th>人工停止 / 中断</th>
+            <th>备注</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>SO100 only</td>
+            <td>未注明</td>
+            <td>1</td>
+            <td>5/7</td>
+            <td><span class="severity mid">1 次</span></td>
+            <td><span class="severity mid">有</span></td>
+            <td>人工将 apricot 放入 gripper 后完成第三个；最后右上角目标失败后中断。</td>
+          </tr>
+          <tr>
+            <td>SO100 only</td>
+            <td>未注明</td>
+            <td>2</td>
+            <td>6/7</td>
+            <td><span class="severity low">0 次</span></td>
+            <td><span class="severity low">无明确记录</span></td>
+            <td>剩余一个滚出桌面；右上角目标可重新抓取并成功放入。</td>
+          </tr>
+          <tr>
+            <td>SO100 only</td>
+            <td>未注明</td>
+            <td>3</td>
+            <td>3/7</td>
+            <td><span class="severity mid">1 次</span></td>
+            <td><span class="severity low">无明确记录</span></td>
+            <td>人工将 apricot 放入 gripper，但后续未成功放入 basket。</td>
+          </tr>
+          <tr>
+            <td>SO100 only</td>
+            <td>未注明</td>
+            <td>4</td>
+            <td>1/7</td>
+            <td><span class="severity low">0 次</span></td>
+            <td><span class="severity mid">有</span></td>
+            <td>记录明确没有人工介入，最后直接停止。</td>
+          </tr>
+          <tr>
+            <td>SO100 only</td>
+            <td>未注明</td>
+            <td>5</td>
+            <td>4/7</td>
+            <td><span class="severity low">0 次</span></td>
+            <td><span class="severity low">无</span></td>
+            <td>rollout 时间结束。</td>
+          </tr>
+          <tr>
+            <td>SO100 only</td>
+            <td>未注明</td>
+            <td>6</td>
+            <td>2/7</td>
+            <td><span class="severity low">0 次</span></td>
+            <td><span class="severity mid">有</span></td>
+            <td>记录明确没有人工介入，最后停止。</td>
+          </tr>
+
+          <tr>
+            <td>SO100 + Human Part 1</td>
+            <td>40k</td>
+            <td>1</td>
+            <td>3/7</td>
+            <td><span class="severity low">0 次</span></td>
+            <td><span class="severity low">无明确记录</span></td>
+            <td>主要问题是 close 过早和 miss 后 place。</td>
+          </tr>
+          <tr>
+            <td>SO100 + Human Part 1</td>
+            <td>40k</td>
+            <td>2</td>
+            <td>0/7</td>
+            <td><span class="severity low">0 次</span></td>
+            <td><span class="severity mid">有</span></td>
+            <td>因反复无法抓取，人工停止。</td>
+          </tr>
+          <tr>
+            <td>SO100 + Human Part 1</td>
+            <td>40k</td>
+            <td>3-5</td>
+            <td>0/7, 0/7, 0/7</td>
+            <td><span class="severity low">0 次</span></td>
+            <td><span class="severity low">无明确记录</span></td>
+            <td>持续出现过早 close、空白区域运动或初始 place。</td>
+          </tr>
+          <tr>
+            <td>SO100 + Human Part 1</td>
+            <td>80k</td>
+            <td>1-4</td>
+            <td>1/7, 0/7, 0/7, 0/7</td>
+            <td><span class="severity low">0 次</span></td>
+            <td><span class="severity low">无明确记录</span></td>
+            <td>记录中有 stuck，但没有明确物理辅助；人工停止未逐项明确。</td>
+          </tr>
+
+          <tr>
+            <td>SO100 + Human Part 1 + Part 2</td>
+            <td>40k / 第一段 80k</td>
+            <td>全部</td>
+            <td>需核对</td>
+            <td><span class="severity low">0 次</span></td>
+            <td><span class="severity mid">沿用重复记录</span></td>
+            <td>该段与 Human Part 1 的 40k/80k 描述一致，建议核对原始日志。</td>
+          </tr>
+          <tr>
+            <td>SO100 + Human Part 1 + Part 2</td>
+            <td>80k 后续</td>
+            <td>1</td>
+            <td>7/7</td>
+            <td><span class="severity low">0 次</span></td>
+            <td><span class="severity low">无</span></td>
+            <td>完整成功，且无误碰记录。</td>
+          </tr>
+          <tr>
+            <td>SO100 + Human Part 1 + Part 2</td>
+            <td>80k 后续</td>
+            <td>2-6</td>
+            <td>1/7, 1/7, 0/7, 3/7, 2/7</td>
+            <td><span class="severity low">0 次</span></td>
+            <td><span class="severity mid">至少 2 次</span></td>
+            <td>Rollout 3 与 6 明确手动停止；其它失败主要来自 side contact、不可达区和空白区停滞。</td>
+          </tr>
+
+          <tr>
+            <td>SO100 + Human Part 1 + Part 2 + Part 3</td>
+            <td>80k</td>
+            <td>1</td>
+            <td>6/7</td>
+            <td><span class="severity low">0 次</span></td>
+            <td><span class="severity low">无明确记录</span></td>
+            <td>一个 apricot 因抖动滚落，后续仍能重新寻找目标。</td>
+          </tr>
+          <tr>
+            <td>SO100 + Human Part 1 + Part 2 + Part 3</td>
+            <td>80k</td>
+            <td>2-3</td>
+            <td>1/7, 3/7</td>
+            <td><span class="severity low">0 次</span></td>
+            <td><span class="severity mid">2 次</span></td>
+            <td>两次均明确手动停止，原因是距离目标往复或空白区域往复。</td>
+          </tr>
+          <tr>
+            <td>SO100 + Human Part 1 + Part 2 + Part 3</td>
+            <td>80k</td>
+            <td>4</td>
+            <td>6/7</td>
+            <td><span class="severity mid">1 次</span></td>
+            <td><span class="severity low">无明确记录</span></td>
+            <td>人工将一个 apricot 放入 gripper 区域；该 6/7 含一次物理辅助。</td>
+          </tr>
+          <tr>
+            <td>SO100 + Human Part 1 + Part 2 + Part 3</td>
+            <td>80k</td>
+            <td>5-8</td>
+            <td>0/7, 1/7, 4/7, 4/6</td>
+            <td><span class="severity low">0 次</span></td>
+            <td><span class="severity low">无明确记录</span></td>
+            <td>主要失败来自多目标滚落、空白区域重复 pick/place，以及目标滚出桌面。</td>
+          </tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section class="section">
+      <h2>建议的后续实验</h2>
+      <div class="recommendations">
+        <article class="card rec">
+          <h3>审查 Human Part 1</h3>
+          <p>重点看 close gripper 的时机、是否存在提前 close、空抓取、动作延迟或与 SO100 风格明显冲突的片段。</p>
+        </article>
+        <article class="card rec">
+          <h3>降低或筛选 human 权重</h3>
+          <p>先尝试只保留高质量 human recovery 片段，或降低 Human Part 1 的采样权重，避免破坏 SO100 基础策略。</p>
+        </article>
+        <article class="card rec">
+          <h3>采集 recovery 数据</h3>
+          <p>优先采集 miss 后重新抓、side contact 后重新定位、目标滚动后重新选择、多个 apricot 聚集后的分离抓取。</p>
+        </article>
+        <article class="card rec">
+          <h3>统计 close 距离</h3>
+          <p>计算训练数据与 rollout 中 close 动作发生时 gripper 到 apricot 的距离，验证早闭合是否来自数据分布偏移。</p>
+        </article>
+        <article class="card rec">
+          <h3>加入 grasp success 信号</h3>
+          <p>如果可用，使用 gripper width、电流、接触或视觉检测来判断是否真的抓住，避免 miss 后直接 place。</p>
+        </article>
+        <article class="card rec">
+          <h3>核对重复记录</h3>
+          <p>确认 Part 1 + Part 2 中重复的 40k/80k 描述是否为复制错误，再更新最终统计表。</p>
+        </article>
+      </div>
+    </section>
+
+    <footer>
+      Standalone HTML report. No external assets or network dependencies.
+    </footer>
+  </main>
+</body>
+</html>

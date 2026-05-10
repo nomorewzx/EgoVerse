@@ -23,7 +23,7 @@ train_datasets:
     _target_: egomimic.rldb.zarr.zarr_dataset_multi.MultiDataset._from_resolver
     resolver:
       _target_: egomimic.rldb.zarr.zarr_dataset_multi.LocalEpisodeResolver
-      folder_path: ${oc.env:APRICOT_HUMAN_RIGHT_ARM_ZARR_ROOT,/home/zxwang/repos/apricot_human_in_domain/egoverse_zarr_apricot_in_domain_min90_ego_view_right_arm}
+      folder_path: ${oc.env:APRICOT_HUMAN_RIGHT_ARM_ZARR_ROOT,/home/zxwang/repos/apricot_human_in_domain/egoverse_zarr_apricot_in_domain_min90_ego_view_right_arm_landscape}
       key_map:
         _target_: egomimic.rldb.embodiment.ego_view.EgoViewRightArm.get_keymap
         mode: cartesian
@@ -62,7 +62,7 @@ valid_datasets:
     _target_: egomimic.rldb.zarr.zarr_dataset_multi.MultiDataset._from_resolver
     resolver:
       _target_: egomimic.rldb.zarr.zarr_dataset_multi.LocalEpisodeResolver
-      folder_path: ${oc.env:APRICOT_HUMAN_RIGHT_ARM_ZARR_ROOT,/home/zxwang/repos/apricot_human_in_domain/egoverse_zarr_apricot_in_domain_min90_ego_view_right_arm}
+      folder_path: ${oc.env:APRICOT_HUMAN_RIGHT_ARM_ZARR_ROOT,/home/zxwang/repos/apricot_human_in_domain/egoverse_zarr_apricot_in_domain_min90_ego_view_right_arm_landscape}
       key_map:
         _target_: egomimic.rldb.embodiment.ego_view.EgoViewRightArm.get_keymap
         mode: cartesian

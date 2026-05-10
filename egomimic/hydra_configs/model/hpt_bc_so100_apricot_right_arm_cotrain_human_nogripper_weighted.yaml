@@ -12,7 +12,7 @@ robomimic_model:
     ego_view_right_arm: "actions_cartesian"
   domain_loss_weights:
     so100_singlearm: 1.0
-    ego_view_right_arm: 0.2
+    ego_view_right_arm: 0.5
 
   trunk:
     embed_dim: 256

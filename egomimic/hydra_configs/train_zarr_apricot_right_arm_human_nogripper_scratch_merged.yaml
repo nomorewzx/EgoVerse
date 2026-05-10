@@ -1,0 +1,63 @@
+defaults:
+  - model: hpt_bc_so100_apricot_right_arm_cotrain_human_nogripper_weighted
+  - visualization: so100_apricot_right_arm_cotrain
+  - paths: default
+  - trainer: default
+  - logger: debug
+  - data: apricot_right_arm_human_nogripper_merged
+  - callbacks: checkpoints
+  - data_schematic: so100_apricot_right_arm_cotrain
+  - override hydra/launcher: basic
+  - _self_
+
+name: so100_apricot_human_scratch
+description: right_arm_human_nogripper_scratch10k
+ckpt_path: null
+mode: train
+
+hydra:
+  run:
+    dir: ./logs/${name}/${description}_${now:%Y-%m-%d_%H-%M-%S}
+  sweep:
+    dir: ./logs/${name}/${description}_${now:%Y-%m-%d_%H-%M-%S}
+
+seed: 42
+reject_outliers: false
+evaluator: null
+
+trainer:
+  default_root_dir: ${hydra:runtime.output_dir}
+  accelerator: gpu
+  devices: 1
+  precision: bf16
+  max_epochs: -1
+  min_epochs: 0
+  max_steps: 10000
+  min_steps: 0
+  limit_train_batches: 1.0
+  limit_val_batches: 1.0
+  num_sanity_val_steps: 0
+  val_check_interval: 1000
+  check_val_every_n_epoch: 1
+  deterministic: false
+
+logger:
+  csv:
+    _target_: lightning.pytorch.loggers.CSVLogger
+    save_dir: ${paths.output_dir}
+    name: csv
+
+callbacks:
+  model_checkpoint:
+    filename: step_{step}
+    auto_insert_metric_name: false
+    save_top_k: -1
+    save_last: true
+    every_n_train_steps: 1000
+    every_n_epochs: null
+
+norm_stats:
+  sample_frac: 1.0
+  num_workers: 4
+  save_cache_dir: ${hydra:runtime.output_dir}
+  precomputed_norm_path: null

@@ -1,0 +1,53 @@
+_target_: egomimic.pl_utils.pl_data_utils.MultiDataModuleWrapper
+
+train_datasets:
+  ego_view_right_arm:
+    _target_: egomimic.rldb.zarr.zarr_dataset_multi.MultiDataset._from_resolver
+    resolver:
+      _target_: egomimic.rldb.zarr.zarr_dataset_multi.LocalEpisodeResolver
+      folder_path: ${oc.env:APRICOT_HUMAN_RIGHT_ARM_MERGED_ZARR_ROOT,/home/zxwang/repos/apricot_human_in_domain/egoverse_zarr_apricot_in_domain_merged_min90_ego_view_right_arm_landscape}
+      key_map:
+        _target_: egomimic.rldb.embodiment.ego_view.EgoViewRightArm.get_keymap
+        mode: cartesian_no_gripper
+      transform_list:
+        _target_: egomimic.rldb.embodiment.ego_view.EgoViewRightArm.get_transform_list
+        mode: cartesian_no_gripper
+        chunk_length: 64
+    filters:
+      _target_: egomimic.rldb.filters.DatasetFilter
+      filter_lambdas:
+        - "lambda row: row.get('embodiment') == 'ego_view_right_arm'"
+        - "lambda row: row.get('source_episode_mode') == 'single_arm_right'"
+    mode: train
+    valid_ratio: 0.1
+
+valid_datasets:
+  ego_view_right_arm:
+    _target_: egomimic.rldb.zarr.zarr_dataset_multi.MultiDataset._from_resolver
+    resolver:
+      _target_: egomimic.rldb.zarr.zarr_dataset_multi.LocalEpisodeResolver
+      folder_path: ${oc.env:APRICOT_HUMAN_RIGHT_ARM_MERGED_ZARR_ROOT,/home/zxwang/repos/apricot_human_in_domain/egoverse_zarr_apricot_in_domain_merged_min90_ego_view_right_arm_landscape}
+      key_map:
+        _target_: egomimic.rldb.embodiment.ego_view.EgoViewRightArm.get_keymap
+        mode: cartesian_no_gripper
+      transform_list:
+        _target_: egomimic.rldb.embodiment.ego_view.EgoViewRightArm.get_transform_list
+        mode: cartesian_no_gripper
+        chunk_length: 64
+    filters:
+      _target_: egomimic.rldb.filters.DatasetFilter
+      filter_lambdas:
+        - "lambda row: row.get('embodiment') == 'ego_view_right_arm'"
+        - "lambda row: row.get('source_episode_mode') == 'single_arm_right'"
+    mode: valid
+    valid_ratio: 0.1
+
+train_dataloader_params:
+  ego_view_right_arm:
+    batch_size: 4
+    num_workers: 8
+
+valid_dataloader_params:
+  ego_view_right_arm:
+    batch_size: 4
+    num_workers: 4

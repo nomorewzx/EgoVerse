@@ -15,7 +15,7 @@ import torch
 from lightning import Callback, LightningDataModule, LightningModule, Trainer
 from lightning.pytorch.loggers import Logger
 from lightning.pytorch.plugins.environments import SLURMEnvironment
-from omegaconf import DictConfig, OmegaConf, open_dict
+from omegaconf import DictConfig, ListConfig, OmegaConf, open_dict
 from tabulate import tabulate
 
 from egomimic.eval.eval import Eval
@@ -30,6 +30,17 @@ from egomimic.utils.utils import extras, task_wrapper
 
 OmegaConf.register_new_resolver("eval", eval)
 log = RankedLogger(__name__, rank_zero_only=True)
+
+
+def _register_checkpoint_safe_globals() -> None:
+    """Allow Lightning resume to load OmegaConf objects under PyTorch 2.6 defaults."""
+    add_safe_globals = getattr(torch.serialization, "add_safe_globals", None)
+    if add_safe_globals is None:
+        return
+    add_safe_globals([DictConfig, ListConfig])
+
+
+_register_checkpoint_safe_globals()
 
 
 def _build_model_config_tree(cfg: DictConfig) -> DictConfig:
@@ -246,6 +257,28 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     os.makedirs(os.path.join(trainer.default_root_dir, "videos"), exist_ok=True)
 
     if mode == "train":
+        init_from_checkpoint = cfg.get("init_from_checkpoint")
+        if init_from_checkpoint and cfg.get("ckpt_path"):
+            raise ValueError(
+                "Set only one of init_from_checkpoint or ckpt_path. "
+                "init_from_checkpoint loads model weights into a new training run; "
+                "ckpt_path resumes Lightning optimizer/trainer state."
+            )
+        if init_from_checkpoint:
+            checkpoint = torch.load(
+                init_from_checkpoint,
+                map_location="cpu",
+                weights_only=False,
+            )
+            strict = bool(cfg.get("init_from_checkpoint_strict", True))
+            missing, unexpected = model.load_state_dict(
+                checkpoint["state_dict"],
+                strict=strict,
+            )
+            log.info(
+                f"Initialized model weights from {init_from_checkpoint} "
+                f"with strict={strict}, missing={missing}, unexpected={unexpected}"
+            )
         if cfg.get("evaluator") is not None:
             eval_obj: Eval = hydra.utils.instantiate(cfg.evaluator)
             eval_obj.trainer = trainer
