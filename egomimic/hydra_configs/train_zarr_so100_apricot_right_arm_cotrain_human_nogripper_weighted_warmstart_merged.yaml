@@ -11,10 +11,10 @@ defaults:
   - _self_
 
 name: so100_apricot_cotrain
-description: right_arm_human_nogripper_weighted0p2_warmstart_merged_part1_part2
+description: right_arm_human_nogripper_fm_paper_warmstart_merged
 ckpt_path: null
 init_from_checkpoint: ${oc.env:SO100_APRICOT_COTRAIN_INIT_CKPT,/home/zxwang/repos/fork_egoverse/EgoVerse/logs/so100_apricot_cotrain/right_arm_human_nogripper_weighted0p2_2026-05-06_13-43-35/checkpoints/last.ckpt}
-init_from_checkpoint_strict: true
+init_from_checkpoint_strict: false
 mode: train
 
 hydra:
@@ -34,7 +34,7 @@ trainer:
   precision: bf16
   max_epochs: -1
   min_epochs: 0
-  max_steps: 50000
+  max_steps: 150000
   min_steps: 0
   limit_train_batches: 1.0
   limit_val_batches: 1.0
@@ -59,24 +59,24 @@ data:
       valid_ratio: 0.1
   train_dataloader_params:
     so100_singlearm:
-      batch_size: 4
+      batch_size: 16
       num_workers: 8
     ego_view_right_arm:
-      batch_size: 4
+      batch_size: 16
       num_workers: 8
   valid_dataloader_params:
     so100_singlearm:
-      batch_size: 4
+      batch_size: 16
       num_workers: 4
     ego_view_right_arm:
-      batch_size: 4
+      batch_size: 16
       num_workers: 4
 
 model:
   optimizer:
     lr: 1e-4
   scheduler:
-    T_max: 50000
+    T_max: 150000
 
 logger:
   csv:

@@ -11,7 +11,7 @@ defaults:
   - _self_
 
 name: so100_apricot_cotrain
-description: right_arm_human_nogripper_weighted0p2
+description: right_arm_human_nogripper_fm_paper
 ckpt_path: null
 mode: train
 
@@ -32,7 +32,7 @@ trainer:
   precision: bf16
   max_epochs: -1
   min_epochs: 0
-  max_steps: 100000
+  max_steps: 150000
   min_steps: 0
   limit_train_batches: 1.0
   limit_val_batches: 1.0
@@ -57,17 +57,17 @@ data:
       valid_ratio: 0.1
   train_dataloader_params:
     so100_singlearm:
-      batch_size: 4
+      batch_size: 16
       num_workers: 8
     ego_view_right_arm:
-      batch_size: 4
+      batch_size: 16
       num_workers: 8
   valid_dataloader_params:
     so100_singlearm:
-      batch_size: 4
+      batch_size: 16
       num_workers: 4
     ego_view_right_arm:
-      batch_size: 4
+      batch_size: 16
       num_workers: 4
 
 logger:

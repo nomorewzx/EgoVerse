@@ -12,7 +12,7 @@ train_datasets:
       transform_list:
         _target_: egomimic.rldb.embodiment.so100.So100SingleArm.get_transform_list
         mode: camera_frame_ypr
-        chunk_length: 64
+        chunk_length: 100
     filters:
       _target_: egomimic.rldb.filters.DatasetFilter
       filter_lambdas:
@@ -32,7 +32,7 @@ valid_datasets:
       transform_list:
         _target_: egomimic.rldb.embodiment.so100.So100SingleArm.get_transform_list
         mode: camera_frame_ypr
-        chunk_length: 64
+        chunk_length: 100
     filters:
       _target_: egomimic.rldb.filters.DatasetFilter
       filter_lambdas:

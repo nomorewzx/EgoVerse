@@ -14,7 +14,7 @@ class So100SingleArm(Embodiment):
 
     VIZ_INTRINSICS_KEY = "base"
     ACTION_HORIZON_REAL = 30
-    ACTION_CHUNK_LENGTH = 64
+    ACTION_CHUNK_LENGTH = 100
     ACTION_STRIDE = 1
 
     @classmethod

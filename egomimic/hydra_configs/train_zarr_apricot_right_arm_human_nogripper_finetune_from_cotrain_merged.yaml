@@ -11,10 +11,10 @@ defaults:
   - _self_
 
 name: so100_apricot_human_finetune
-description: right_arm_human_nogripper_from_cotrain_w0p5_step40k_ft5k
+description: right_arm_human_nogripper_fm_paper_from_cotrain_ft5k
 ckpt_path: null
 init_from_checkpoint: /home/zxwang/repos/fork_egoverse/EgoVerse/logs/so100_apricot_cotrain/right_arm_human_nogripper_weighted0p5_scratch_merged_40k_probe_2026-05-07_21-54-38/checkpoints/last.ckpt
-init_from_checkpoint_strict: true
+init_from_checkpoint_strict: false
 mode: train
 
 hydra:

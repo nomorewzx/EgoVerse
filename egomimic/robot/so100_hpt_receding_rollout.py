@@ -3,6 +3,8 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import queue
+import threading
 import time
 from collections import deque
 from contextlib import nullcontext
@@ -241,7 +243,7 @@ class SO100HPTPolicy:
         checkpoint: str | Path,
         device: str,
         precision: str,
-        action_horizon: int,
+        action_horizon: int | None,
         bgr_to_rgb: bool,
     ):
         requested_device = torch.device(device)
@@ -249,7 +251,6 @@ class SO100HPTPolicy:
             raise RuntimeError("CUDA was requested but torch.cuda.is_available() is false")
         self.device = requested_device
         self.precision = precision
-        self.action_horizon = int(action_horizon)
         self.bgr_to_rgb = bool(bgr_to_rgb)
 
         if hasattr(torch, "set_float32_matmul_precision"):
@@ -264,6 +265,36 @@ class SO100HPTPolicy:
         self.wrapper = self.wrapper.to(self.device)
         self.wrapper.eval()
         self.wrapper.model.device = self.device
+        self.head = self.wrapper.model.nets["policy"].heads["so100_singlearm"]
+        self.diffusion = bool(getattr(self.wrapper.model, "diffusion", False))
+        self.head_action_horizon = getattr(self.head, "action_horizon", None)
+        self.num_inference_steps = getattr(self.head, "num_inference_steps", None)
+
+        if action_horizon is None:
+            if self.head_action_horizon is None:
+                raise ValueError(
+                    "Checkpoint head does not expose action_horizon; pass --action-horizon explicitly."
+                )
+            self.action_horizon = int(self.head_action_horizon)
+        else:
+            self.action_horizon = int(action_horizon)
+            if (
+                self.head_action_horizon is not None
+                and self.action_horizon != int(self.head_action_horizon)
+            ):
+                print(
+                    "[so100] WARNING: --action-horizon "
+                    f"{self.action_horizon} differs from checkpoint head horizon "
+                    f"{self.head_action_horizon}; forward_eval will crop/pad by the dummy action length."
+                )
+
+        print(
+            "[so100] policy head: "
+            f"{self.head.__class__.__name__} diffusion={self.diffusion} "
+            f"head_action_horizon={self.head_action_horizon} "
+            f"rollout_action_horizon={self.action_horizon} "
+            f"num_inference_steps={self.num_inference_steps}"
+        )
 
     def _autocast(self):
         if self.device.type != "cuda" or self.precision == "fp32":
@@ -403,15 +434,45 @@ class SO100Safety:
                 q_current + self.max_joint_delta_deg,
             )
 
-        gripper = float(np.clip(target_gripper, self.gripper_min, self.gripper_max))
-        g_delta = float(
+        gripper, _ = self.clip_gripper_target(current_gripper, target_gripper)
+        return q_safe, gripper
+
+    def clip_gripper_target(
+        self,
+        current_gripper: float,
+        target_gripper: float,
+    ) -> tuple[float, dict[str, Any]]:
+        current = float(current_gripper)
+        raw_target = float(target_gripper)
+        range_clipped_target = float(np.clip(raw_target, self.gripper_min, self.gripper_max))
+        raw_delta = raw_target - current
+        range_clipped_delta = range_clipped_target - current
+        delta_limited_delta = float(
             np.clip(
-                gripper - float(current_gripper),
+                range_clipped_delta,
                 -self.max_gripper_delta,
                 self.max_gripper_delta,
             )
         )
-        return q_safe, float(current_gripper) + g_delta
+        safe_target = current + delta_limited_delta
+        debug = {
+            "current": current,
+            "raw_target": raw_target,
+            "range_clipped_target": range_clipped_target,
+            "safe_target": safe_target,
+            "gripper_min": float(self.gripper_min),
+            "gripper_max": float(self.gripper_max),
+            "max_gripper_delta": float(self.max_gripper_delta),
+            "raw_delta_from_current": raw_delta,
+            "range_clipped_delta_from_current": range_clipped_delta,
+            "delta_limited_delta_from_current": delta_limited_delta,
+            "range_clip_delta": range_clipped_target - raw_target,
+            "delta_clip_delta": delta_limited_delta - range_clipped_delta,
+            "total_clip_delta_from_raw": safe_target - raw_target,
+            "range_clipped": bool(not np.isclose(range_clipped_target, raw_target)),
+            "delta_limited": bool(not np.isclose(delta_limited_delta, range_clipped_delta)),
+        }
+        return safe_target, debug
 
     def ik_position_error(self, solved_base_T_ee: np.ndarray, target_base_T_ee: np.ndarray) -> float:
         return float(
@@ -442,6 +503,130 @@ class JsonlLogger:
             return
         self.fp.write(json.dumps(record, separators=(",", ":")) + "\n")
         self.fp.flush()
+
+
+class AsyncVideoRecorder:
+    def __init__(
+        self,
+        path: str | Path | None,
+        *,
+        fps: float,
+        codec: str,
+        queue_size: int,
+        every_n_steps: int,
+        input_color: str,
+    ):
+        self.path = Path(path).expanduser() if path else None
+        self.fps = float(fps)
+        self.codec = str(codec)
+        self.every_n_steps = max(1, int(every_n_steps))
+        self.input_color = input_color
+        self.queue: queue.Queue[np.ndarray | None] = queue.Queue(maxsize=max(1, int(queue_size)))
+        self.thread: threading.Thread | None = None
+        self.writer = None
+        self.enabled = self.path is not None
+        self.frames_enqueued = 0
+        self.frames_written = 0
+        self.frames_dropped = 0
+        self.error: str | None = None
+
+    def __enter__(self):
+        if not self.enabled:
+            return self
+        if cv2 is None:
+            raise ImportError("cv2 is required for --record-video")
+        if self.fps <= 0:
+            raise ValueError("--video-fps must be positive")
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.thread = threading.Thread(target=self._worker, name="async-video-recorder", daemon=True)
+        self.thread.start()
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        self.close()
+
+    def enqueue(self, step: int, image: np.ndarray) -> bool:
+        if not self.enabled or step % self.every_n_steps != 0:
+            return False
+        try:
+            # Copy before returning to the control loop so the writer thread never
+            # observes a camera buffer that is reused by the capture backend.
+            frame = np.ascontiguousarray(image).copy()
+            self.queue.put_nowait(frame)
+            self.frames_enqueued += 1
+            return True
+        except queue.Full:
+            self.frames_dropped += 1
+            return False
+
+    def close(self) -> None:
+        if not self.enabled:
+            return
+        try:
+            self.queue.put(None, timeout=1.0)
+        except queue.Full:
+            self.frames_dropped += 1
+            try:
+                _ = self.queue.get_nowait()
+                self.queue.put_nowait(None)
+            except queue.Empty:
+                pass
+        if self.thread is not None:
+            self.thread.join()
+            self.thread = None
+        if self.writer is not None:
+            self.writer.release()
+            self.writer = None
+
+    def summary(self) -> dict[str, Any]:
+        return {
+            "video_path": str(self.path) if self.path is not None else None,
+            "video_frames_enqueued": self.frames_enqueued,
+            "video_frames_written": self.frames_written,
+            "video_frames_dropped": self.frames_dropped,
+            "video_error": self.error,
+        }
+
+    def _worker(self) -> None:
+        while True:
+            item = self.queue.get()
+            if item is None:
+                self.queue.task_done()
+                break
+            try:
+                frame_bgr = self._prepare_frame_bgr(item)
+                if self.writer is None:
+                    height, width = frame_bgr.shape[:2]
+                    fourcc = cv2.VideoWriter_fourcc(*self.codec)
+                    self.writer = cv2.VideoWriter(str(self.path), fourcc, self.fps, (width, height))
+                    if not self.writer.isOpened():
+                        raise RuntimeError(f"Failed to open video writer: {self.path}")
+                self.writer.write(frame_bgr)
+                self.frames_written += 1
+            except Exception as exc:
+                self.error = str(exc)
+                self.frames_dropped += 1
+            finally:
+                self.queue.task_done()
+
+    def _prepare_frame_bgr(self, frame: np.ndarray) -> np.ndarray:
+        frame = np.asarray(frame)
+        if frame.ndim != 3:
+            raise ValueError(f"Expected video frame shape (H,W,C) or (C,H,W), got {frame.shape}")
+        if frame.shape[0] == 3 and frame.shape[-1] != 3:
+            frame = np.transpose(frame, (1, 2, 0))
+        if frame.shape[-1] != 3:
+            raise ValueError(f"Expected 3-channel video frame, got {frame.shape}")
+        if frame.dtype != np.uint8:
+            frame = frame.astype(np.float32, copy=False)
+            if float(np.nanmax(frame)) <= 1.5:
+                frame = frame * 255.0
+            frame = np.clip(frame, 0, 255).astype(np.uint8)
+        if self.input_color == "rgb":
+            return cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+        if self.input_color == "bgr":
+            return np.ascontiguousarray(frame)
+        raise ValueError(f"Unsupported input_color: {self.input_color}")
 
 
 def append_jsonl(path: str | Path | None, record: dict[str, Any]) -> None:
@@ -617,6 +802,15 @@ def build_log_path(args: argparse.Namespace) -> Path | None:
     return Path("logs/so100_hpt/rollout_logs") / f"so100_hpt_rollout_{stamp}.jsonl"
 
 
+def build_video_path(args: argparse.Namespace) -> Path | None:
+    if not args.record_video:
+        return None
+    if args.video_path is not None:
+        return Path(args.video_path).expanduser()
+    stamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    return Path("logs/so100_hpt/rollout_videos") / f"so100_hpt_rollout_{stamp}.mp4"
+
+
 def make_source(args: argparse.Namespace):
     if args.offline_zarr_episode is not None:
         return OfflineZarrSource(args)
@@ -631,6 +825,99 @@ def step_record_base(step: int, dry_run: bool) -> dict[str, Any]:
         "time": time.time(),
         "dry_run": bool(dry_run),
     }
+
+
+def numeric_sequence_stats(values: np.ndarray) -> dict[str, Any]:
+    arr = np.asarray(values, dtype=np.float64).reshape(-1)
+    finite = arr[np.isfinite(arr)]
+    stats: dict[str, Any] = {
+        "count": int(arr.size),
+        "finite_count": int(finite.size),
+    }
+    if arr.size == 0 or finite.size == 0:
+        stats.update(
+            {
+                "first": None,
+                "last": None,
+                "min": None,
+                "max": None,
+                "mean": None,
+                "std": None,
+                "range": None,
+            }
+        )
+        return stats
+    stats.update(
+        {
+            "first": float(arr[0]),
+            "last": float(arr[-1]),
+            "min": float(np.min(finite)),
+            "max": float(np.max(finite)),
+            "mean": float(np.mean(finite)),
+            "std": float(np.std(finite)),
+            "range": float(np.max(finite) - np.min(finite)),
+        }
+    )
+    return stats
+
+
+def rollout_start_record(
+    args: argparse.Namespace,
+    *,
+    dry_run: bool,
+    log_path: Path | None,
+    video_path: Path | None,
+    policy: SO100HPTPolicy,
+    arm_joint_limits_deg: np.ndarray | None,
+) -> dict[str, Any]:
+    record = step_record_base(-1, dry_run)
+    record["event"] = "rollout_start"
+    record["argv"] = list(sys.argv)
+    record["checkpoint"] = str(Path(args.checkpoint).expanduser())
+    record["conversion_metadata"] = str(Path(args.conversion_metadata).expanduser())
+    record["urdf"] = str(Path(args.urdf).expanduser())
+    record["target_frame_name"] = args.target_frame_name
+    record["robot_id"] = args.robot_id
+    record["port"] = args.port
+    record["camera_type"] = args.camera_type
+    record["camera"] = args.camera
+    record["camera_key"] = args.camera_key
+    record["frequency"] = float(args.frequency)
+    record["query_frequency"] = int(args.query_frequency)
+    record["action_start_index"] = int(args.action_start_index)
+    record["action_stride"] = int(args.action_stride)
+    record["max_steps"] = int(args.max_steps)
+    record["max_ee_delta_m"] = float(args.max_ee_delta_m)
+    record["max_rot_delta_deg"] = float(args.max_rot_delta_deg)
+    record["max_joint_delta_deg"] = float(args.max_joint_delta_deg)
+    record["joint_limit_margin_deg"] = float(args.joint_limit_margin_deg)
+    record["max_gripper_delta"] = float(args.max_gripper_delta)
+    record["gripper_min"] = float(args.gripper_min)
+    record["gripper_max"] = float(args.gripper_max)
+    record["lerobot_max_relative_target"] = (
+        None
+        if args.lerobot_max_relative_target is None
+        else float(args.lerobot_max_relative_target)
+    )
+    record["max_ik_pos_error_m"] = float(args.max_ik_pos_error_m)
+    record["stuck_action"] = args.stuck_action
+    record["stuck_window"] = int(args.stuck_window)
+    record["log_jsonl"] = None if log_path is None else str(log_path)
+    record["record_video"] = bool(args.record_video)
+    record["video_path"] = None if video_path is None else str(video_path)
+    record["action_key"] = ACTION_KEY
+    record["policy_head_class"] = policy.head.__class__.__name__
+    record["policy_diffusion"] = bool(policy.diffusion)
+    record["policy_head_action_horizon"] = (
+        None if policy.head_action_horizon is None else int(policy.head_action_horizon)
+    )
+    record["policy_rollout_action_horizon"] = int(policy.action_horizon)
+    record["policy_num_inference_steps"] = (
+        None if policy.num_inference_steps is None else int(policy.num_inference_steps)
+    )
+    if arm_joint_limits_deg is not None:
+        record["arm_joint_limits_deg"] = np.asarray(arm_joint_limits_deg, dtype=np.float64).tolist()
+    return record
 
 
 def current_camera_pose_from_observation(
@@ -652,6 +939,8 @@ def current_camera_pose_from_observation(
 
 
 def run(args: argparse.Namespace) -> None:
+    if args.dry_run and args.enable_motors:
+        raise ValueError("Use only one of --dry-run or --enable-motors.")
     dry_run = not args.enable_motors
     if args.enable_motors and args.offline_zarr_episode is not None:
         raise ValueError("--enable-motors is incompatible with --offline-zarr-episode")
@@ -661,6 +950,12 @@ def run(args: argparse.Namespace) -> None:
         raise ValueError("--action-stride must be positive")
     if args.action_start_index < 0:
         raise ValueError("--action-start-index must be non-negative")
+    if args.video_fps is None:
+        args.video_fps = args.frequency
+    if args.video_every_n_steps <= 0:
+        raise ValueError("--video-every-n-steps must be positive")
+    if args.video_queue_size <= 0:
+        raise ValueError("--video-queue-size must be positive")
 
     workspace_min = as_float_array(args.workspace_min, 3, "--workspace-min")
     workspace_max = as_float_array(args.workspace_max, 3, "--workspace-max")
@@ -703,6 +998,7 @@ def run(args: argparse.Namespace) -> None:
     last_step: int | None = None
     stuck_counter = 0
     log_path = None if args.no_log else build_log_path(args)
+    video_path = build_video_path(args)
 
     print(f"[so100] checkpoint: {args.checkpoint}")
     print(f"[so100] dry_run: {dry_run}  enable_motors: {args.enable_motors}")
@@ -711,6 +1007,7 @@ def run(args: argparse.Namespace) -> None:
         f"action_stride={args.action_stride}"
     )
     print(f"[so100] log_jsonl: {log_path}")
+    print(f"[so100] video_path: {video_path}")
     if dry_run:
         print("[so100] motors are disabled; add --enable-motors to send commands")
 
@@ -748,20 +1045,40 @@ def run(args: argparse.Namespace) -> None:
                 f"in {(time.perf_counter() - start) * 1000.0:.1f} ms"
             )
 
-        with JsonlLogger(log_path) as logger, RateLoop(
+        with JsonlLogger(log_path) as logger, AsyncVideoRecorder(
+            video_path,
+            fps=args.video_fps,
+            codec=args.video_codec,
+            queue_size=args.video_queue_size,
+            every_n_steps=args.video_every_n_steps,
+            input_color=args.video_input_color,
+        ) as video_recorder, RateLoop(
             frequency=args.frequency,
             max_iterations=args.max_steps,
             verbose=args.verbose_rate,
         ) as loop:
+            logger.write(
+                rollout_start_record(
+                    args,
+                    dry_run=dry_run,
+                    log_path=log_path,
+                    video_path=video_path,
+                    policy=policy,
+                    arm_joint_limits_deg=arm_joint_limits_deg,
+                )
+            )
             for step in loop:
                 loop_start = time.perf_counter()
                 record = step_record_base(step, dry_run)
 
                 obs_t = timed(source.observe)
                 obs = obs_t.value
+                video_enqueued = video_recorder.enqueue(step, obs["image"])
                 q_current = np.asarray(obs["q"], dtype=np.float64)
                 current_gripper = float(obs["gripper"])
                 previous_observed_q = last_observed_q.copy() if last_observed_q is not None else None
+                previous_observed_gripper = last_observed_gripper
+                previous_sent_gripper = last_sent_gripper
                 current_low_margin, current_high_margin, current_min_margin = safety.joint_limit_margins(
                     q_current
                 )
@@ -778,6 +1095,8 @@ def run(args: argparse.Namespace) -> None:
                 last_observed_q = q_current.copy()
                 last_observed_gripper = current_gripper
                 record["obs_ms"] = obs_t.ms
+                record["video_enqueued"] = video_enqueued
+                record["video_frames_dropped"] = video_recorder.frames_dropped
                 record["q_current"] = q_current.tolist()
                 record["gripper_current"] = current_gripper
                 record["q_current_limit_margin_low_deg"] = current_low_margin.tolist()
@@ -807,14 +1126,30 @@ def run(args: argparse.Namespace) -> None:
                             f"action_start_index {start} with action_stride {args.action_stride} "
                             f"leaves no actions in chunk shape {last_prediction.shape}"
                         )
+                    selected_prediction = last_prediction[action_indices]
+                    pred_gripper_chunk = last_prediction[:, 6].astype(np.float64, copy=False)
+                    executed_gripper_chunk = selected_prediction[:, 6].astype(np.float64, copy=False)
                     action_queue.clear()
-                    action_queue.extend(last_prediction[action_indices])
+                    action_queue.extend(selected_prediction)
                     record["query"] = True
                     record["inference_ms"] = infer_t.ms
                     record["pred_shape"] = list(last_prediction.shape)
                     record["action_indices"] = action_indices.astype(int).tolist()
                     record["action_stride"] = args.action_stride
                     record["queued_actions"] = len(action_queue)
+                    record["policy_input_gripper"] = float(current_ee_camera_ypr[6])
+                    record["pred_gripper_chunk"] = pred_gripper_chunk.tolist()
+                    record["pred_gripper_chunk_stats"] = numeric_sequence_stats(pred_gripper_chunk)
+                    record["executed_gripper_chunk"] = executed_gripper_chunk.tolist()
+                    record["executed_gripper_chunk_stats"] = numeric_sequence_stats(
+                        executed_gripper_chunk
+                    )
+                    record["executed_gripper_delta_from_current_chunk"] = (
+                        executed_gripper_chunk - current_gripper
+                    ).tolist()
+                    record["executed_gripper_delta_from_policy_input_chunk"] = (
+                        executed_gripper_chunk - float(current_ee_camera_ypr[6])
+                    ).tolist()
                 else:
                     record["query"] = False
 
@@ -832,6 +1167,10 @@ def run(args: argparse.Namespace) -> None:
                 record["target_camera_ypr"] = target_camera_ypr.tolist()
                 record["target_base_xyz"] = clipped_base_T_ee[:3, 3].tolist()
                 record["target_gripper"] = target_gripper
+                record["target_gripper_delta_from_current"] = target_gripper - current_gripper
+                record["target_gripper_delta_from_policy_input"] = (
+                    target_gripper - float(current_ee_camera_ypr[6])
+                )
 
                 if q_ik is None:
                     record["skip_reason"] = "ik_nonfinite"
@@ -860,6 +1199,10 @@ def run(args: argparse.Namespace) -> None:
                     current_gripper,
                     target_gripper,
                 )
+                _, gripper_clip_debug = safety.clip_gripper_target(
+                    current_gripper,
+                    target_gripper,
+                )
                 target_delta_xyz_m = float(
                     np.linalg.norm(target_camera_ypr[:3] - current_ee_camera_ypr[:3])
                 )
@@ -873,6 +1216,11 @@ def run(args: argparse.Namespace) -> None:
                     if previous_observed_q is not None
                     else float("nan")
                 )
+                observed_gripper_delta_since_last = (
+                    current_gripper - previous_observed_gripper
+                    if previous_observed_gripper is not None
+                    else float("nan")
+                )
                 if (
                     args.stuck_action != "none"
                     and np.isfinite(observed_motion_since_last)
@@ -884,6 +1232,30 @@ def run(args: argparse.Namespace) -> None:
                     stuck_counter = 0
                 record["q_safe"] = q_safe.tolist()
                 record["gripper_safe"] = gripper_safe
+                record["gripper_raw_target"] = target_gripper
+                record["gripper_range_clipped_target"] = gripper_clip_debug[
+                    "range_clipped_target"
+                ]
+                record["gripper_delta_limited_target"] = gripper_clip_debug["safe_target"]
+                record["gripper_clip_debug"] = gripper_clip_debug
+                record["gripper_safe_delta_from_current"] = gripper_safe - current_gripper
+                record["gripper_safe_delta_from_target"] = gripper_safe - target_gripper
+                record["gripper_range_clip_delta"] = gripper_clip_debug["range_clip_delta"]
+                record["gripper_delta_clip_delta"] = gripper_clip_debug["delta_clip_delta"]
+                record["gripper_total_clip_delta_from_raw"] = gripper_clip_debug[
+                    "total_clip_delta_from_raw"
+                ]
+                record["gripper_range_clipped"] = gripper_clip_debug["range_clipped"]
+                record["gripper_delta_limited"] = gripper_clip_debug["delta_limited"]
+                record["gripper_command_delta_from_previous_sent"] = (
+                    gripper_safe - previous_sent_gripper
+                    if previous_sent_gripper is not None
+                    else float("nan")
+                )
+                record["observed_gripper_delta_since_last"] = observed_gripper_delta_since_last
+                record["observed_gripper_abs_delta_since_last"] = abs(
+                    observed_gripper_delta_since_last
+                )
                 record["target_delta_xyz_m"] = target_delta_xyz_m
                 record["clipped_target_delta_xyz_m"] = clipped_target_delta_xyz_m
                 record["max_joint_delta_deg"] = max_joint_delta_deg
@@ -901,11 +1273,24 @@ def run(args: argparse.Namespace) -> None:
                     send_t = timed(lambda: source.send(q_safe, gripper_safe))
                     sent = send_t.value
                     send_ms = send_t.ms
+                sent_gripper = sent.get(f"{GRIPPER_NAME}.pos") if isinstance(sent, dict) else None
+                if sent_gripper is None:
+                    sent_gripper = gripper_safe
+                sent_gripper = float(sent_gripper)
                 record["send_ms"] = send_ms
                 record["sent"] = sent
+                record["sent_gripper"] = sent_gripper
+                record["sent_gripper_delta_from_current"] = sent_gripper - current_gripper
+                record["sent_gripper_delta_from_target"] = sent_gripper - target_gripper
+                record["sent_gripper_delta_from_safe"] = sent_gripper - gripper_safe
+                record["sent_gripper_delta_from_previous_sent"] = (
+                    sent_gripper - previous_sent_gripper
+                    if previous_sent_gripper is not None
+                    else float("nan")
+                )
                 record["loop_ms"] = (time.perf_counter() - loop_start) * 1000.0
                 last_sent_q = q_safe.copy()
-                last_sent_gripper = gripper_safe
+                last_sent_gripper = sent_gripper
                 last_step = step
                 logger.write(record)
 
@@ -939,6 +1324,9 @@ def run(args: argparse.Namespace) -> None:
 
         if last_prediction is not None:
             print(f"[so100] last prediction shape: {last_prediction.shape}")
+        if video_path is not None:
+            video_summary = video_recorder.summary()
+            print(f"[so100] video summary: {video_summary}")
         if args.post_rollout_hold_s > 0:
             print(
                 f"[so100] holding final target for {args.post_rollout_hold_s:.2f}s "
@@ -1001,8 +1389,10 @@ def run(args: argparse.Namespace) -> None:
                     final_record["ee_camera_ypr"] = ee_after_camera_ypr.tolist()
                     final_record["q_safe"] = last_sent_q.tolist()
                     final_record["gripper_safe"] = last_sent_gripper
+                    final_record["sent_gripper"] = last_sent_gripper
                     if last_target_camera_ypr is not None:
                         final_record["target_camera_ypr"] = last_target_camera_ypr.tolist()
+                        final_record["target_gripper"] = float(last_target_camera_ypr[6])
                     final_record["final_readback_hold_moved_deg"] = hold_moved
                     final_record["final_readback_total_moved_deg"] = total_moved
                     final_record["final_readback_max_remaining_deg"] = remaining
@@ -1059,11 +1449,20 @@ def parse_args() -> argparse.Namespace:
         default=1,
         help=(
             "Stride through predicted chunk actions. For example, "
-            "--query-frequency 32 --action-stride 2 executes indices 0,2,...,62 "
-            "at the control frequency, compressing a 64-frame chunk to 32 steps."
+            "--query-frequency 50 --action-stride 2 executes indices 0,2,...,98 "
+            "at the control frequency, compressing a 100-frame chunk to 50 steps."
         ),
     )
-    parser.add_argument("--action-horizon", type=int, default=64)
+    parser.add_argument(
+        "--action-horizon",
+        type=int,
+        default=None,
+        help=(
+            "Length of the dummy action sequence used for normalization/eval cropping. "
+            "Defaults to the checkpoint head action_horizon, e.g. 100 for FM/diffusion "
+            "heads and 64 for older MLP heads."
+        ),
+    )
     parser.add_argument("--max-steps", type=int, default=300)
     parser.add_argument("--print-every", type=int, default=1)
     parser.add_argument("--warmup-iters", type=int, default=3)
@@ -1117,6 +1516,11 @@ def parse_args() -> argparse.Namespace:
         help="Actually send q_safe to SO100. Without this flag the runner is dry-run.",
     )
     parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Do not send motor commands. This is the default unless --enable-motors is set.",
+    )
+    parser.add_argument(
         "--keep-torque-on-disconnect",
         action="store_true",
         help=(
@@ -1127,6 +1531,45 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--verbose-rate", action="store_true")
     parser.add_argument("--log-jsonl", default=None)
     parser.add_argument("--no-log", action="store_true")
+    parser.add_argument(
+        "--record-video",
+        action="store_true",
+        help="Asynchronously write observed camera frames to an mp4 during rollout.",
+    )
+    parser.add_argument(
+        "--video-path",
+        default=None,
+        help="Output video path. Defaults to logs/so100_hpt/rollout_videos/<timestamp>.mp4.",
+    )
+    parser.add_argument(
+        "--video-fps",
+        type=float,
+        default=None,
+        help="Output video FPS. Defaults to --frequency when omitted.",
+    )
+    parser.add_argument(
+        "--video-codec",
+        default="mp4v",
+        help="OpenCV fourcc codec for video writing, e.g. mp4v or avc1.",
+    )
+    parser.add_argument(
+        "--video-queue-size",
+        type=int,
+        default=180,
+        help="Max frames buffered for async video writing before new frames are dropped.",
+    )
+    parser.add_argument(
+        "--video-every-n-steps",
+        type=int,
+        default=1,
+        help="Record one frame every N control steps to reduce enqueue/copy overhead.",
+    )
+    parser.add_argument(
+        "--video-input-color",
+        choices=["rgb", "bgr"],
+        default="rgb",
+        help="Color order of obs image before writing. OpenCV output is converted to BGR.",
+    )
 
     parser.add_argument(
         "--offline-zarr-episode",

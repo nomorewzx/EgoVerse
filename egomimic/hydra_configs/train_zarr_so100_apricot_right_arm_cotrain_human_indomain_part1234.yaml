@@ -1,17 +1,17 @@
 defaults:
-  - model: hpt_bc_so100_singlearm_base
-  - visualization: so100_singlearm
+  - model: hpt_bc_so100_apricot_right_arm_cotrain_human_nogripper_weighted
+  - visualization: so100_apricot_right_arm_cotrain
   - paths: default
   - trainer: default
   - logger: debug
-  - data: so100_singlearm
+  - data: so100_apricot_right_arm_cotrain_human_indomain_part1234
   - callbacks: checkpoints
-  - data_schematic: so100_singlearm
+  - data_schematic: so100_apricot_right_arm_cotrain
   - override hydra/launcher: basic
   - _self_
 
-name: so100_hpt
-description: hpt_fm_paper_steps150k
+name: so100_apricot_cotrain
+description: right_arm_human_indomain_part1234_fm_paper_steps150k
 ckpt_path: null
 mode: train
 
@@ -45,18 +45,36 @@ data:
     so100_singlearm:
       mode: train
       valid_ratio: 0.1
+    ego_view_right_arm:
+      mode: train
+      valid_ratio: 0.1
   valid_datasets:
     so100_singlearm:
       mode: valid
       valid_ratio: 0.1
+    ego_view_right_arm:
+      mode: valid
+      valid_ratio: 0.1
   train_dataloader_params:
     so100_singlearm:
-      batch_size: 32
+      batch_size: 16
+      num_workers: 8
+    ego_view_right_arm:
+      batch_size: 16
       num_workers: 8
   valid_dataloader_params:
     so100_singlearm:
-      batch_size: 32
+      batch_size: 16
       num_workers: 4
+    ego_view_right_arm:
+      batch_size: 16
+      num_workers: 4
+
+model:
+  optimizer:
+    lr: 1e-4
+  scheduler:
+    T_max: 150000
 
 logger:
   csv:
