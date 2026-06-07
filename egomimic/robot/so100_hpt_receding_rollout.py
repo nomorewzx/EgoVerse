@@ -25,6 +25,7 @@ from scipy.spatial.transform import Rotation as R
 
 from egomimic.pl_utils.pl_model import ModelWrapper
 from egomimic.robot.robot_utils import RateLoop
+from egomimic.utils.egomimicUtils import interpolate_arr_euler
 
 try:
     import zarr
@@ -59,6 +60,8 @@ ARM_JOINT_NAMES = [
 ]
 GRIPPER_NAME = "gripper"
 ACTION_KEY = "so100_singlearm_actions_cartesian"
+DEFAULT_QUERY_FREQUENCY = 30
+DEFAULT_RESAMPLED_ACTION_LEN = 45
 
 
 def load_lerobot_arm_joint_limits_deg(calibration_fpath: str | Path) -> np.ndarray:
@@ -861,6 +864,75 @@ def numeric_sequence_stats(values: np.ndarray) -> dict[str, Any]:
     return stats
 
 
+def resample_camera_ypr_chunk(chunk: np.ndarray, target_len: int) -> np.ndarray:
+    actions = np.asarray(chunk, dtype=np.float64)
+    if actions.ndim != 2 or actions.shape[1] != 7:
+        raise ValueError(f"Expected action chunk shape (T, 7), got {actions.shape}")
+    if target_len <= 0:
+        raise ValueError(f"target_len must be positive, got {target_len}")
+    if actions.shape[0] == target_len:
+        return actions.astype(np.float32, copy=False)
+    return interpolate_arr_euler(actions[None, ...], target_len)[0].astype(np.float32)
+
+
+def angle_delta_norm(a: np.ndarray, b: np.ndarray) -> float:
+    delta = np.asarray(a, dtype=np.float64) - np.asarray(b, dtype=np.float64)
+    delta = (delta + np.pi) % (2.0 * np.pi) - np.pi
+    return float(np.linalg.norm(delta))
+
+
+def blend_replanned_chunk(
+    new_chunk: np.ndarray,
+    previous_chunk: np.ndarray | None,
+    *,
+    tail_start: int,
+    blend_steps: int,
+    dims: str,
+) -> tuple[np.ndarray, dict[str, Any]]:
+    if blend_steps <= 0 or previous_chunk is None:
+        return new_chunk, {
+            "applied": False,
+            "steps_applied": 0,
+            "tail_start_index": int(tail_start),
+        }
+
+    if dims not in {"pose", "all"}:
+        raise ValueError(f"Unsupported blend dims: {dims}")
+
+    old_tail = previous_chunk[tail_start:]
+    n = min(int(blend_steps), len(old_tail), len(new_chunk))
+    info: dict[str, Any] = {
+        "applied": n > 0,
+        "steps_applied": int(n),
+        "tail_start_index": int(tail_start),
+        "reference_chunk_shape": list(previous_chunk.shape),
+        "requested_steps": int(blend_steps),
+        "dims": dims,
+    }
+    if n <= 0:
+        return new_chunk, info
+
+    out = new_chunk.copy()
+    dim_slice = slice(0, 6) if dims == "pose" else slice(None)
+    pre = new_chunk[:n].copy()
+    ref = old_tail[:n].copy()
+    for i in range(n):
+        alpha = float(i + 1) / float(n)
+        out[i, dim_slice] = alpha * new_chunk[i, dim_slice] + (1.0 - alpha) * ref[i, dim_slice]
+
+    info["alphas"] = [float(i + 1) / float(n) for i in range(n)]
+    info["pre_first_pos_gap_m"] = float(np.linalg.norm(pre[0, :3] - ref[0, :3]))
+    info["post_first_pos_gap_m"] = float(np.linalg.norm(out[0, :3] - ref[0, :3]))
+    info["pre_first_rot_gap_rad"] = angle_delta_norm(pre[0, 3:6], ref[0, 3:6])
+    info["post_first_rot_gap_rad"] = angle_delta_norm(out[0, 3:6], ref[0, 3:6])
+    info["max_pose_delta_m"] = float(np.max(np.linalg.norm(out[:n, :3] - pre[:, :3], axis=1)))
+    info["max_rot_delta_rad"] = float(
+        np.max([angle_delta_norm(out[i, 3:6], pre[i, 3:6]) for i in range(n)])
+    )
+    info["max_gripper_delta"] = float(np.max(np.abs(out[:n, 6] - pre[:, 6])))
+    return out, info
+
+
 def rollout_start_record(
     args: argparse.Namespace,
     *,
@@ -886,6 +958,12 @@ def rollout_start_record(
     record["query_frequency"] = int(args.query_frequency)
     record["action_start_index"] = int(args.action_start_index)
     record["action_stride"] = int(args.action_stride)
+    record["resampled_action_len"] = int(args.resampled_action_len)
+    record["action_selection_mode"] = (
+        "resample" if args.resampled_action_len > 0 else "stride"
+    )
+    record["rollout_blend_steps"] = int(args.rollout_blend_steps)
+    record["rollout_blend_dims"] = args.rollout_blend_dims
     record["max_steps"] = int(args.max_steps)
     record["max_ee_delta_m"] = float(args.max_ee_delta_m)
     record["max_rot_delta_deg"] = float(args.max_rot_delta_deg)
@@ -946,10 +1024,40 @@ def run(args: argparse.Namespace) -> None:
         raise ValueError("--enable-motors is incompatible with --offline-zarr-episode")
     if args.query_frequency <= 0:
         raise ValueError("--query-frequency must be positive")
+    if args.resampled_action_len < 0:
+        raise ValueError("--resampled-action-len must be non-negative")
     if args.action_stride <= 0:
         raise ValueError("--action-stride must be positive")
     if args.action_start_index < 0:
         raise ValueError("--action-start-index must be non-negative")
+    if (
+        args.resampled_action_len > 0
+        and args.action_start_index + args.query_frequency > args.resampled_action_len
+    ):
+        raise ValueError(
+            "--action-start-index + --query-frequency must fit within "
+            "--resampled-action-len when using official resample mode. "
+            f"Got {args.action_start_index} + {args.query_frequency} > "
+            f"{args.resampled_action_len}. Use the official default "
+            f"--query-frequency {DEFAULT_QUERY_FREQUENCY} --resampled-action-len "
+            f"{DEFAULT_RESAMPLED_ACTION_LEN}, or pass --resampled-action-len 0 "
+            "to use legacy action-stride mode."
+        )
+    if args.rollout_blend_steps < 0:
+        raise ValueError("--rollout-blend-steps must be non-negative")
+    if args.rollout_blend_steps > 0 and args.resampled_action_len <= 0:
+        raise ValueError("--rollout-blend-steps requires resample mode")
+    if (
+        args.rollout_blend_steps > 0
+        and args.action_start_index + args.query_frequency >= args.resampled_action_len
+    ):
+        raise ValueError(
+            "--rollout-blend-steps needs unexecuted tail actions from the previous "
+            "resampled chunk. Use a resample length larger than "
+            "--action-start-index + --query-frequency, e.g. "
+            "--query-frequency 30 --resampled-action-len 45 "
+            "--rollout-blend-steps 5."
+        )
     if args.video_fps is None:
         args.video_fps = args.frequency
     if args.video_every_n_steps <= 0:
@@ -988,6 +1096,7 @@ def run(args: argparse.Namespace) -> None:
     source = make_source(args)
     action_queue: deque[np.ndarray] = deque()
     last_prediction: np.ndarray | None = None
+    last_action_chunk: np.ndarray | None = None
     initial_observed_q: np.ndarray | None = None
     initial_observed_gripper: float | None = None
     last_observed_q: np.ndarray | None = None
@@ -1004,7 +1113,11 @@ def run(args: argparse.Namespace) -> None:
     print(f"[so100] dry_run: {dry_run}  enable_motors: {args.enable_motors}")
     print(
         f"[so100] query_frequency: {args.query_frequency} at {args.frequency} Hz "
-        f"action_stride={args.action_stride}"
+        f"resampled_action_len={args.resampled_action_len} "
+        f"action_stride={args.action_stride} "
+        f"mode={'resample' if args.resampled_action_len > 0 else 'stride'} "
+        f"blend_steps={args.rollout_blend_steps} "
+        f"blend_dims={args.rollout_blend_dims}"
     )
     print(f"[so100] log_jsonl: {log_path}")
     print(f"[so100] video_path: {video_path}")
@@ -1118,28 +1231,88 @@ def run(args: argparse.Namespace) -> None:
                 if should_query:
                     infer_t = timed(lambda: policy.predict(obs["image"], current_ee_camera_ypr))
                     last_prediction = infer_t.value
-                    start = args.action_start_index
-                    action_indices = start + np.arange(args.query_frequency) * args.action_stride
-                    action_indices = action_indices[action_indices < last_prediction.shape[0]]
-                    if len(action_indices) == 0:
-                        raise ValueError(
-                            f"action_start_index {start} with action_stride {args.action_stride} "
-                            f"leaves no actions in chunk shape {last_prediction.shape}"
-                        )
-                    selected_prediction = last_prediction[action_indices]
                     pred_gripper_chunk = last_prediction[:, 6].astype(np.float64, copy=False)
+                    if args.resampled_action_len > 0:
+                        action_chunk = resample_camera_ypr_chunk(
+                            last_prediction,
+                            args.resampled_action_len,
+                        )
+                        pre_blend_action_chunk = action_chunk.copy()
+                        blend_tail_start = args.action_start_index + args.query_frequency
+                        action_chunk, blend_info = blend_replanned_chunk(
+                            action_chunk,
+                            last_action_chunk,
+                            tail_start=blend_tail_start,
+                            blend_steps=args.rollout_blend_steps,
+                            dims=args.rollout_blend_dims,
+                        )
+                        start = args.action_start_index
+                        stop = start + args.query_frequency
+                        selected_prediction = action_chunk[start:stop]
+                        action_indices = np.arange(start, stop, dtype=int)
+                        action_selection_mode = "resample"
+                    else:
+                        action_chunk = last_prediction
+                        pre_blend_action_chunk = action_chunk
+                        blend_info = {
+                            "applied": False,
+                            "steps_applied": 0,
+                            "tail_start_index": None,
+                        }
+                        start = args.action_start_index
+                        action_indices = (
+                            start + np.arange(args.query_frequency) * args.action_stride
+                        )
+                        action_indices = action_indices[action_indices < last_prediction.shape[0]]
+                        if len(action_indices) == 0:
+                            raise ValueError(
+                                f"action_start_index {start} with action_stride {args.action_stride} "
+                                f"leaves no actions in chunk shape {last_prediction.shape}"
+                            )
+                        selected_prediction = last_prediction[action_indices]
+                        action_selection_mode = "stride"
+
+                    action_chunk_gripper = action_chunk[:, 6].astype(np.float64, copy=False)
+                    pre_blend_action_chunk_gripper = pre_blend_action_chunk[:, 6].astype(
+                        np.float64,
+                        copy=False,
+                    )
                     executed_gripper_chunk = selected_prediction[:, 6].astype(np.float64, copy=False)
                     action_queue.clear()
                     action_queue.extend(selected_prediction)
+                    last_action_chunk = action_chunk.copy()
                     record["query"] = True
                     record["inference_ms"] = infer_t.ms
                     record["pred_shape"] = list(last_prediction.shape)
+                    record["action_selection_mode"] = action_selection_mode
+                    record["resampled_action_len"] = int(args.resampled_action_len)
+                    record["rollout_blend_steps"] = int(args.rollout_blend_steps)
+                    record["rollout_blend_dims"] = args.rollout_blend_dims
+                    record["rollout_blend_info"] = blend_info
+                    record["rollout_blend_applied"] = bool(blend_info.get("applied"))
+                    record["rollout_blend_steps_applied"] = int(
+                        blend_info.get("steps_applied", 0)
+                    )
+                    record["action_chunk_shape"] = list(action_chunk.shape)
                     record["action_indices"] = action_indices.astype(int).tolist()
+                    record["action_indices_source"] = (
+                        "resampled_chunk" if args.resampled_action_len > 0 else "raw_chunk"
+                    )
                     record["action_stride"] = args.action_stride
                     record["queued_actions"] = len(action_queue)
                     record["policy_input_gripper"] = float(current_ee_camera_ypr[6])
                     record["pred_gripper_chunk"] = pred_gripper_chunk.tolist()
                     record["pred_gripper_chunk_stats"] = numeric_sequence_stats(pred_gripper_chunk)
+                    record["pre_blend_action_chunk_gripper"] = (
+                        pre_blend_action_chunk_gripper.tolist()
+                    )
+                    record["pre_blend_action_chunk_gripper_stats"] = numeric_sequence_stats(
+                        pre_blend_action_chunk_gripper
+                    )
+                    record["action_chunk_gripper"] = action_chunk_gripper.tolist()
+                    record["action_chunk_gripper_stats"] = numeric_sequence_stats(
+                        action_chunk_gripper
+                    )
                     record["executed_gripper_chunk"] = executed_gripper_chunk.tolist()
                     record["executed_gripper_chunk_stats"] = numeric_sequence_stats(
                         executed_gripper_chunk
@@ -1158,6 +1331,8 @@ def run(args: argparse.Namespace) -> None:
                 target_camera_ypr = np.asarray(action_queue.popleft(), dtype=np.float64)
                 last_target_camera_ypr = target_camera_ypr.copy()
                 target_base_T_ee = bridge.camera_ypr_to_base_T_ee(target_camera_ypr)
+                raw_target_base_xyz = target_base_T_ee[:3, 3].copy()
+                current_base_xyz = current_base_T_ee[:3, 3].copy()
                 clipped_base_T_ee = safety.clip_target_pose(current_base_T_ee, target_base_T_ee)
                 target_gripper = float(target_camera_ypr[6])
 
@@ -1206,8 +1381,14 @@ def run(args: argparse.Namespace) -> None:
                 target_delta_xyz_m = float(
                     np.linalg.norm(target_camera_ypr[:3] - current_ee_camera_ypr[:3])
                 )
+                raw_target_base_delta_xyz_m = float(
+                    np.linalg.norm(raw_target_base_xyz - current_base_xyz)
+                )
                 clipped_target_delta_xyz_m = float(
-                    np.linalg.norm(clipped_base_T_ee[:3, 3] - current_base_T_ee[:3, 3])
+                    np.linalg.norm(clipped_base_T_ee[:3, 3] - current_base_xyz)
+                )
+                target_pose_clip_delta_xyz_m = float(
+                    np.linalg.norm(clipped_base_T_ee[:3, 3] - raw_target_base_xyz)
                 )
                 max_joint_delta_deg = float(np.max(np.abs(q_safe - q_current)))
                 safe_low_margin, safe_high_margin, safe_min_margin = safety.joint_limit_margins(q_safe)
@@ -1257,7 +1438,14 @@ def run(args: argparse.Namespace) -> None:
                     observed_gripper_delta_since_last
                 )
                 record["target_delta_xyz_m"] = target_delta_xyz_m
+                record["target_camera_delta_xyz_m"] = target_delta_xyz_m
+                record["raw_target_base_xyz"] = raw_target_base_xyz.tolist()
+                record["raw_target_base_delta_xyz_m"] = raw_target_base_delta_xyz_m
                 record["clipped_target_delta_xyz_m"] = clipped_target_delta_xyz_m
+                record["clipped_target_base_xyz"] = clipped_base_T_ee[:3, 3].tolist()
+                record["clipped_target_base_delta_xyz_m"] = clipped_target_delta_xyz_m
+                record["target_pose_clip_delta_xyz_m"] = target_pose_clip_delta_xyz_m
+                record["target_pose_position_clipped"] = target_pose_clip_delta_xyz_m > 1e-9
                 record["max_joint_delta_deg"] = max_joint_delta_deg
                 record["observed_motion_since_last_deg"] = observed_motion_since_last
                 record["stuck_counter"] = stuck_counter
@@ -1441,16 +1629,55 @@ def parse_args() -> argparse.Namespace:
     )
 
     parser.add_argument("--frequency", type=float, default=30.0)
-    parser.add_argument("--query-frequency", type=int, default=5)
-    parser.add_argument("--action-start-index", type=int, default=0)
+    parser.add_argument("--query-frequency", type=int, default=DEFAULT_QUERY_FREQUENCY)
+    parser.add_argument(
+        "--resampled-action-len",
+        type=int,
+        default=DEFAULT_RESAMPLED_ACTION_LEN,
+        help=(
+            "Official EgoVerse-style action chunk resample length. A predicted chunk "
+            "is linearly resampled to this length, then the first --query-frequency "
+            "steps are executed before replanning. Pass 0 to disable and use legacy "
+            "--action-stride indexing."
+        ),
+    )
+    parser.add_argument(
+        "--action-start-index",
+        type=int,
+        default=0,
+        help=(
+            "First action index to execute after resampling, or in the raw chunk when "
+            "--resampled-action-len 0."
+        ),
+    )
     parser.add_argument(
         "--action-stride",
         type=int,
         default=1,
         help=(
-            "Stride through predicted chunk actions. For example, "
+            "Legacy stride through predicted chunk actions, used only when "
+            "--resampled-action-len 0. For example, "
             "--query-frequency 50 --action-stride 2 executes indices 0,2,...,98 "
             "at the control frequency, compressing a 100-frame chunk to 50 steps."
+        ),
+    )
+    parser.add_argument(
+        "--rollout-blend-steps",
+        type=int,
+        default=0,
+        help=(
+            "Blend the first N actions of a newly replanned resampled chunk with "
+            "the unexecuted tail of the previous chunk. This requires "
+            "--resampled-action-len > --action-start-index + --query-frequency."
+        ),
+    )
+    parser.add_argument(
+        "--rollout-blend-dims",
+        choices=("pose", "all"),
+        default="pose",
+        help=(
+            "Dimensions to blend when --rollout-blend-steps is active. The default "
+            "'pose' blends xyz+ypr only and leaves gripper commands unchanged."
         ),
     )
     parser.add_argument(

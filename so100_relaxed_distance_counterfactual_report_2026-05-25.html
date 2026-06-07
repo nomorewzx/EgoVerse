@@ -1,0 +1,268 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/><title>SO100 Relaxed Distance Counterfactual</title><style>body{margin:0;background:#f7f8fa;color:#17202a;font:14px/1.55 system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}main{max-width:1180px;margin:0 auto;padding:28px 24px 56px}h1{font-size:28px;line-height:1.2;margin:0 0 8px;letter-spacing:0}h2{font-size:20px;margin:28px 0 10px;letter-spacing:0}.note{color:#596575}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:12px;margin:14px 0 20px}.callout{background:#fff;border:1px solid #d8dee8;border-left:4px solid #2f6f73;padding:12px 14px}.warn{border-left-color:#9a5b00}img{max-width:100%;height:auto;border:1px solid #d8dee8;background:#fff;margin:8px 0 18px}table.data{border-collapse:collapse;width:100%;background:#fff;margin:8px 0 18px;font-size:13px}table.data th,table.data td{border:1px solid #d8dee8;padding:6px 8px;text-align:right;vertical-align:top}table.data th:first-child,table.data td:first-child,table.data th:nth-child(2),table.data td:nth-child(2){text-align:left}table.data th{background:#eef2f5;font-weight:650}code{background:#eef2f5;padding:1px 4px;border-radius:4px}</style></head><body><main>
+<h1>SO100 Relaxed Distance Counterfactual</h1>
+<p class="note">Threshold relaxed to 150px across the same two rollouts: 180 query frames. New samples beyond 70px are sparse: 70-95 has 8 frames, 95-150 has 7 frames.</p>
+<h2>Key Finding</h2><div class="grid"><div class="callout"><b>Direction advantage does get stronger farther out.</b><br/>For 70-150px, Cotrain first10 direction-cos delta is positive vs both SO100-only baselines, with 60-73% frame win rate.</div><div class="callout warn"><b>But it is not enough evidence for a firm claim.</b><br/>The widened region adds only 15 frames, so this is a signal to test on more rollouts rather than a stable statistical conclusion.</div><div class="callout"><b>Approach still differs from execution.</b><br/>Even with better early direction, Cotrain can lose final progress by step 30 because target-axis progress is not sustained.</div></div>
+<h2>First10 Direction by Distance Band</h2><img src="logs/so100_hpt/rollout_counterfactual_probe/so100_cotrain_vs_so100_near_apricot_threshold150_deepdive_2026-05-25_first10_direction_by_distance_band.png" alt="first10 direction by band"/><table class="dataframe data">
+  <thead>
+    <tr style="text-align: right;">
+      <th>baseline</th>
+      <th>distance_band</th>
+      <th>n_frames</th>
+      <th>first10_delta_cos_mean</th>
+      <th>first10_delta_cos_median</th>
+      <th>first10_delta_cos_win_rate</th>
+      <th>step10_delta_target_axis_mean</th>
+      <th>step10_delta_progress_mean</th>
+      <th>step10_delta_progress_win_rate</th>
+      <th>step10_delta_lateral_abs_mean</th>
+      <th>step10_delta_gripper_mean</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>FM SO100 60k</td>
+      <td>00_30</td>
+      <td>95</td>
+      <td>-0.033</td>
+      <td>-0.107</td>
+      <td>0.432</td>
+      <td>0.185</td>
+      <td>-1.152</td>
+      <td>0.316</td>
+      <td>1.353</td>
+      <td>3.883</td>
+    </tr>
+    <tr>
+      <td>FM SO100 60k</td>
+      <td>30_50</td>
+      <td>47</td>
+      <td>0.062</td>
+      <td>0.004</td>
+      <td>0.511</td>
+      <td>-0.320</td>
+      <td>-0.659</td>
+      <td>0.468</td>
+      <td>1.434</td>
+      <td>4.607</td>
+    </tr>
+    <tr>
+      <td>FM SO100 60k</td>
+      <td>50_70</td>
+      <td>23</td>
+      <td>0.321</td>
+      <td>0.297</td>
+      <td>0.652</td>
+      <td>2.972</td>
+      <td>2.897</td>
+      <td>0.609</td>
+      <td>1.610</td>
+      <td>4.060</td>
+    </tr>
+    <tr>
+      <td>FM SO100 60k</td>
+      <td>70_150</td>
+      <td>15</td>
+      <td>0.400</td>
+      <td>0.477</td>
+      <td>0.733</td>
+      <td>3.200</td>
+      <td>3.250</td>
+      <td>0.800</td>
+      <td>1.907</td>
+      <td>3.661</td>
+    </tr>
+    <tr>
+      <td>FM SO100 80k</td>
+      <td>00_30</td>
+      <td>95</td>
+      <td>-0.065</td>
+      <td>-0.110</td>
+      <td>0.400</td>
+      <td>0.993</td>
+      <td>-0.786</td>
+      <td>0.358</td>
+      <td>1.859</td>
+      <td>3.388</td>
+    </tr>
+    <tr>
+      <td>FM SO100 80k</td>
+      <td>30_50</td>
+      <td>47</td>
+      <td>0.062</td>
+      <td>0.040</td>
+      <td>0.532</td>
+      <td>-0.067</td>
+      <td>-0.424</td>
+      <td>0.447</td>
+      <td>1.529</td>
+      <td>3.833</td>
+    </tr>
+    <tr>
+      <td>FM SO100 80k</td>
+      <td>50_70</td>
+      <td>23</td>
+      <td>0.052</td>
+      <td>0.035</td>
+      <td>0.522</td>
+      <td>0.537</td>
+      <td>0.274</td>
+      <td>0.435</td>
+      <td>2.833</td>
+      <td>3.228</td>
+    </tr>
+    <tr>
+      <td>FM SO100 80k</td>
+      <td>70_150</td>
+      <td>15</td>
+      <td>0.176</td>
+      <td>0.155</td>
+      <td>0.600</td>
+      <td>3.045</td>
+      <td>2.969</td>
+      <td>0.800</td>
+      <td>3.047</td>
+      <td>3.665</td>
+    </tr>
+  </tbody>
+</table>
+<h2>50-70 vs 70-150 Horizon Curves</h2><img src="logs/so100_hpt/rollout_counterfactual_probe/so100_cotrain_vs_so100_near_apricot_threshold150_deepdive_2026-05-25_distance_band_delta_curves_50_70_vs_70_150.png" alt="distance band delta curves"/>
+<h2>Raw Far Bins</h2><p class="note">Raw far bins are small and should be read as diagnostics.</p><table class="dataframe data">
+  <thead>
+    <tr style="text-align: right;">
+      <th>baseline</th>
+      <th>distance_band</th>
+      <th>n_frames</th>
+      <th>first10_delta_cos_mean</th>
+      <th>first10_delta_cos_win_rate</th>
+      <th>step10_delta_progress_mean</th>
+      <th>step10_delta_progress_win_rate</th>
+      <th>step10_delta_target_axis_mean</th>
+      <th>step10_delta_lateral_abs_mean</th>
+      <th>step10_delta_gripper_mean</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>FM SO100 60k</td>
+      <td>00_30</td>
+      <td>95</td>
+      <td>-0.033</td>
+      <td>0.432</td>
+      <td>-1.152</td>
+      <td>0.316</td>
+      <td>0.185</td>
+      <td>1.353</td>
+      <td>3.883</td>
+    </tr>
+    <tr>
+      <td>FM SO100 60k</td>
+      <td>30_50</td>
+      <td>47</td>
+      <td>0.062</td>
+      <td>0.511</td>
+      <td>-0.659</td>
+      <td>0.468</td>
+      <td>-0.320</td>
+      <td>1.434</td>
+      <td>4.607</td>
+    </tr>
+    <tr>
+      <td>FM SO100 60k</td>
+      <td>50_70</td>
+      <td>23</td>
+      <td>0.321</td>
+      <td>0.652</td>
+      <td>2.897</td>
+      <td>0.609</td>
+      <td>2.972</td>
+      <td>1.610</td>
+      <td>4.060</td>
+    </tr>
+    <tr>
+      <td>FM SO100 60k</td>
+      <td>70_95</td>
+      <td>8</td>
+      <td>0.506</td>
+      <td>0.875</td>
+      <td>3.616</td>
+      <td>0.875</td>
+      <td>3.884</td>
+      <td>4.055</td>
+      <td>3.596</td>
+    </tr>
+    <tr>
+      <td>FM SO100 60k</td>
+      <td>95_150</td>
+      <td>7</td>
+      <td>0.278</td>
+      <td>0.571</td>
+      <td>2.831</td>
+      <td>0.714</td>
+      <td>2.418</td>
+      <td>-0.548</td>
+      <td>3.736</td>
+    </tr>
+    <tr>
+      <td>FM SO100 80k</td>
+      <td>00_30</td>
+      <td>95</td>
+      <td>-0.065</td>
+      <td>0.400</td>
+      <td>-0.786</td>
+      <td>0.358</td>
+      <td>0.993</td>
+      <td>1.859</td>
+      <td>3.388</td>
+    </tr>
+    <tr>
+      <td>FM SO100 80k</td>
+      <td>30_50</td>
+      <td>47</td>
+      <td>0.062</td>
+      <td>0.532</td>
+      <td>-0.424</td>
+      <td>0.447</td>
+      <td>-0.067</td>
+      <td>1.529</td>
+      <td>3.833</td>
+    </tr>
+    <tr>
+      <td>FM SO100 80k</td>
+      <td>50_70</td>
+      <td>23</td>
+      <td>0.052</td>
+      <td>0.522</td>
+      <td>0.274</td>
+      <td>0.435</td>
+      <td>0.537</td>
+      <td>2.833</td>
+      <td>3.228</td>
+    </tr>
+    <tr>
+      <td>FM SO100 80k</td>
+      <td>70_95</td>
+      <td>8</td>
+      <td>0.153</td>
+      <td>0.625</td>
+      <td>2.173</td>
+      <td>0.750</td>
+      <td>2.458</td>
+      <td>4.956</td>
+      <td>3.437</td>
+    </tr>
+    <tr>
+      <td>FM SO100 80k</td>
+      <td>95_150</td>
+      <td>7</td>
+      <td>0.202</td>
+      <td>0.571</td>
+      <td>3.879</td>
+      <td>0.857</td>
+      <td>3.716</td>
+      <td>0.864</td>
+      <td>3.925</td>
+    </tr>
+  </tbody>
+</table>
+<h2>Artifacts</h2><p><code>logs/so100_hpt/rollout_counterfactual_probe/so100_cotrain_vs_so100_near_apricot_threshold150_deepdive_2026-05-25_first10_direction_by_distance_band.csv</code></p><p><code>logs/so100_hpt/rollout_counterfactual_probe/so100_cotrain_vs_so100_near_apricot_threshold150_deepdive_2026-05-25_first10_direction_by_raw_distance_band.csv</code></p><p><code>logs/so100_hpt/rollout_counterfactual_probe/so100_cotrain_vs_so100_near_apricot_threshold150_deepdive_2026-05-25_direction_progress_by_distance_band_steps.csv</code></p><p><code>logs/so100_hpt/rollout_counterfactual_probe/so100_cotrain_vs_so100_near_apricot_threshold150_deepdive_2026-05-25_horizon_pairwise_deltas.csv</code></p>
+</main></body></html>

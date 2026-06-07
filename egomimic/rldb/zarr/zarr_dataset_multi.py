@@ -38,6 +38,7 @@ from egomimic.rldb.embodiment.embodiment import get_embodiment_id
 
 # from action_chunk_transforms import Transform
 from egomimic.rldb.filters import DatasetFilter
+
 try:
     from egomimic.utils.aws.aws_data_utils import load_env
     from egomimic.utils.aws.aws_sql import (
@@ -569,6 +570,189 @@ class LocalEpisodeResolver(EpisodeResolver):
         return datasets
 
 
+class GripperPhaseOversampler:
+    """
+    Build an oversampled MultiDataset index map from gripper command phases.
+
+    The sampler keeps the top-level dataloader key unchanged while changing the
+    frame distribution inside that dataset. By default, a 50/25/25 config with
+    a full phase uses every original frame once and samples the phase-specific
+    buckets with replacement to fill the remaining half of the epoch.
+    """
+
+    def __init__(
+        self,
+        phases: list[dict[str, Any]],
+        action_zarr_key: str = "cmd_ee_pose_cam_rotvec",
+        gripper_dim: int = 6,
+        horizon: int = 100,
+        closed_threshold: float = 38.0,
+        open_threshold: float = 35.0,
+        min_close_delta: float = 5.0,
+        hold_min_fraction: float = 0.5,
+        epoch_size: int | None = None,
+        seed: int = SEED,
+    ):
+        if not phases:
+            raise ValueError("GripperPhaseOversampler requires at least one phase")
+        self.phases = phases
+        self.action_zarr_key = action_zarr_key
+        self.gripper_dim = int(gripper_dim)
+        self.horizon = int(horizon)
+        self.closed_threshold = float(closed_threshold)
+        self.open_threshold = float(open_threshold)
+        self.min_close_delta = float(min_close_delta)
+        self.hold_min_fraction = float(hold_min_fraction)
+        self.epoch_size = epoch_size
+        self.seed = int(seed)
+        self.last_summary: dict[str, Any] = {}
+
+        if self.horizon <= 0:
+            raise ValueError(f"horizon must be positive, got {horizon}")
+        total_fraction = sum(float(phase["fraction"]) for phase in self.phases)
+        if total_fraction <= 0.0:
+            raise ValueError("phase fractions must sum to a positive value")
+        for phase in self.phases:
+            if float(phase["fraction"]) < 0.0:
+                raise ValueError(f"phase fraction must be non-negative: {phase}")
+
+    def build_index_map(
+        self,
+        datasets: dict[str, "MultiDataset | ZarrDataset"],
+        base_index_map: list[tuple[str, int]],
+    ) -> list[tuple[str, int]]:
+        phase_indices = {
+            str(phase["name"]): self._indices_for_phase(
+                str(phase["name"]), datasets, base_index_map
+            )
+            for phase in self.phases
+        }
+        target_epoch_size = self._resolve_epoch_size(phase_indices, len(base_index_map))
+        phase_counts = self._phase_counts(target_epoch_size)
+
+        rng = random.Random(self.seed)
+        sampled_index_map: list[tuple[str, int]] = []
+        summary = {
+            "base_len": len(base_index_map),
+            "epoch_size": target_epoch_size,
+            "phases": {},
+        }
+        for phase in self.phases:
+            name = str(phase["name"])
+            candidates = phase_indices[name]
+            count = phase_counts[name]
+            if count <= 0:
+                continue
+            if not candidates:
+                raise ValueError(f"No frames matched gripper phase '{name}'")
+            if count <= len(candidates):
+                selected = rng.sample(candidates, count)
+            else:
+                selected = [rng.choice(candidates) for _ in range(count)]
+            sampled_index_map.extend(selected)
+            summary["phases"][name] = {
+                "available": len(candidates),
+                "sampled": count,
+                "fraction": float(phase["fraction"]),
+            }
+
+        rng.shuffle(sampled_index_map)
+        self.last_summary = summary
+        logger.info("GripperPhaseOversampler summary: %s", summary)
+        return sampled_index_map
+
+    def _resolve_epoch_size(
+        self,
+        phase_indices: dict[str, list[tuple[str, int]]],
+        base_len: int,
+    ) -> int:
+        if self.epoch_size is not None:
+            if self.epoch_size <= 0:
+                raise ValueError(f"epoch_size must be positive, got {self.epoch_size}")
+            return int(self.epoch_size)
+
+        full_fraction = 0.0
+        for phase in self.phases:
+            if str(phase["name"]) == "full":
+                full_fraction = float(phase["fraction"])
+                break
+        if full_fraction > 0.0:
+            return int(round(len(phase_indices["full"]) / full_fraction))
+        return base_len
+
+    def _phase_counts(self, epoch_size: int) -> dict[str, int]:
+        total_fraction = sum(float(phase["fraction"]) for phase in self.phases)
+        counts: dict[str, int] = {}
+        allocated = 0
+        for phase in self.phases[:-1]:
+            name = str(phase["name"])
+            count = int(round(epoch_size * float(phase["fraction"]) / total_fraction))
+            counts[name] = count
+            allocated += count
+        counts[str(self.phases[-1]["name"])] = max(0, epoch_size - allocated)
+        return counts
+
+    def _indices_for_phase(
+        self,
+        phase_name: str,
+        datasets: dict[str, "MultiDataset | ZarrDataset"],
+        base_index_map: list[tuple[str, int]],
+    ) -> list[tuple[str, int]]:
+        if phase_name == "full":
+            return list(base_index_map)
+        if phase_name not in {"closing", "closed_hold"}:
+            raise ValueError(
+                f"Unsupported gripper phase '{phase_name}'. "
+                "Expected one of: full, closing, closed_hold."
+            )
+
+        selected: list[tuple[str, int]] = []
+        for dataset_name, dataset in datasets.items():
+            if isinstance(dataset, MultiDataset):
+                raise ValueError("GripperPhaseOversampler does not support nested MultiDataset")
+            gripper = self._load_gripper(dataset)
+            for local_idx in range(len(dataset)):
+                chunk = gripper[local_idx : min(len(gripper), local_idx + self.horizon)]
+                if len(chunk) == 0:
+                    continue
+                if phase_name == "closing" and self._is_closing(chunk):
+                    selected.append((dataset_name, local_idx))
+                elif phase_name == "closed_hold" and self._is_closed_hold(chunk):
+                    selected.append((dataset_name, local_idx))
+        return selected
+
+    def _load_gripper(self, dataset: "ZarrDataset") -> np.ndarray:
+        store = dataset.episode_reader._store
+        if self.action_zarr_key not in store:
+            raise KeyError(
+                f"Zarr episode {dataset.episode_path} has no key "
+                f"'{self.action_zarr_key}'"
+            )
+        actions = np.asarray(store[self.action_zarr_key][:])
+        if actions.ndim != 2 or self.gripper_dim >= actions.shape[1]:
+            raise ValueError(
+                f"Expected action array (T, D>{self.gripper_dim}) for "
+                f"'{self.action_zarr_key}', got {actions.shape}"
+            )
+        return actions[:, self.gripper_dim].astype(np.float32, copy=False)
+
+    def _is_closing(self, chunk: np.ndarray) -> bool:
+        start = float(chunk[0])
+        future_max = float(np.max(chunk))
+        return (
+            start <= self.open_threshold
+            and future_max >= self.closed_threshold
+            and future_max - start >= self.min_close_delta
+        )
+
+    def _is_closed_hold(self, chunk: np.ndarray) -> bool:
+        closed = chunk >= self.closed_threshold
+        return (
+            float(chunk[0]) >= self.closed_threshold
+            and float(np.mean(closed)) >= self.hold_min_fraction
+        )
+
+
 class MultiDataset(torch.utils.data.Dataset):
     """
     Self wrapping MultiDataset, can wrap zarr or multi dataset.
@@ -581,6 +765,7 @@ class MultiDataset(torch.utils.data.Dataset):
         mode="train",
         percent=0.1,
         valid_ratio=0.2,
+        frame_sampler: GripperPhaseOversampler | None = None,
         **kwargs,
     ):
         """
@@ -589,6 +774,8 @@ class MultiDataset(torch.utils.data.Dataset):
             mode (str, optional): Split mode to use (e.g., "train", "valid"). Defaults to "train".
             percent (float, optional): Fraction of the dataset to use from each underlying dataset. Defaults to 0.1.
             valid_ratio (float, optional): Validation split ratio for datasets that support a train/valid split.
+            frame_sampler (optional): Rewrites the frame index map for controlled
+                oversampling while preserving the top-level embodiment name.
             **kwargs: Additional keyword arguments passed to underlying dataset constructors if needed.
         """
         self.train_collections, self.valid_collections = split_dataset_names(
@@ -624,6 +811,14 @@ class MultiDataset(torch.utils.data.Dataset):
             for local_idx in range(len(dataset)):
                 global_idx = len(self.index_map)
                 self.index_map.append((dataset_name, local_idx))
+                self._global_indices_by_dataset[dataset_name].append(global_idx)
+
+        if frame_sampler is not None:
+            self.index_map = frame_sampler.build_index_map(self.datasets, self.index_map)
+            self._global_indices_by_dataset = {
+                dataset_name: [] for dataset_name in self.datasets
+            }
+            for global_idx, (dataset_name, _) in enumerate(self.index_map):
                 self._global_indices_by_dataset[dataset_name].append(global_idx)
 
         self.data_schematic = None

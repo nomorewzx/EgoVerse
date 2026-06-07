@@ -1,0 +1,68 @@
+_target_: egomimic.pl_utils.pl_data_utils.MultiDataModuleWrapper
+
+train_datasets:
+  so100_singlearm:
+    _target_: egomimic.rldb.zarr.zarr_dataset_multi.MultiDataset._from_resolver
+    resolver:
+      _target_: egomimic.rldb.zarr.zarr_dataset_multi.LocalEpisodeResolver
+      folder_path: ${oc.env:SO100_HPT_ZARR_ROOT,/home/zxwang/so100-ee-cam-egoverse-zarr}
+      key_map:
+        _target_: egomimic.rldb.embodiment.so100.So100SingleArm.get_keymap
+        mode: camera_frame_ypr
+      transform_list:
+        _target_: egomimic.rldb.embodiment.so100.So100SingleArm.get_transform_list
+        mode: camera_frame_ypr
+        chunk_length: 100
+    filters:
+      _target_: egomimic.rldb.filters.DatasetFilter
+      filter_lambdas:
+        - "lambda row: row.get('embodiment') == 'so100_singlearm'"
+    mode: total
+    valid_ratio: 0.0
+    frame_sampler:
+      _target_: egomimic.rldb.zarr.zarr_dataset_multi.GripperPhaseOversampler
+      phases:
+        - name: full
+          fraction: 0.5
+        - name: closing
+          fraction: 0.25
+        - name: closed_hold
+          fraction: 0.25
+      action_zarr_key: cmd_ee_pose_cam_rotvec
+      gripper_dim: 6
+      horizon: 100
+      closed_threshold: 38.0
+      open_threshold: 35.0
+      min_close_delta: 5.0
+      hold_min_fraction: 0.5
+      seed: 42
+
+valid_datasets:
+  so100_singlearm:
+    _target_: egomimic.rldb.zarr.zarr_dataset_multi.MultiDataset._from_resolver
+    resolver:
+      _target_: egomimic.rldb.zarr.zarr_dataset_multi.LocalEpisodeResolver
+      folder_path: ${oc.env:SO100_HPT_ZARR_ROOT,/home/zxwang/so100-ee-cam-egoverse-zarr}
+      key_map:
+        _target_: egomimic.rldb.embodiment.so100.So100SingleArm.get_keymap
+        mode: camera_frame_ypr
+      transform_list:
+        _target_: egomimic.rldb.embodiment.so100.So100SingleArm.get_transform_list
+        mode: camera_frame_ypr
+        chunk_length: 100
+    filters:
+      _target_: egomimic.rldb.filters.DatasetFilter
+      filter_lambdas:
+        - "lambda row: row.get('embodiment') == 'so100_singlearm'"
+    mode: total
+    valid_ratio: 0.0
+
+train_dataloader_params:
+  so100_singlearm:
+    batch_size: 16
+    num_workers: 8
+
+valid_dataloader_params:
+  so100_singlearm:
+    batch_size: 16
+    num_workers: 4

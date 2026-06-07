@@ -1,6 +1,7 @@
 import random
 import time
 from collections import OrderedDict, deque
+from fnmatch import fnmatch
 from typing import Any, Dict
 
 import hydra
@@ -51,6 +52,8 @@ class ModelWrapper(LightningModule):
         viz_func=None,
         evaluator=None,
         enable_grad_norm: bool = True,
+        trainable_parameter_patterns: list[str] | None = None,
+        frozen_parameter_patterns: list[str] | None = None,
     ):
         """
         Args:
@@ -77,6 +80,10 @@ class ModelWrapper(LightningModule):
             self.params = self.model.nets["policy"].params
         except Exception:
             pass
+        self._apply_parameter_trainability(
+            trainable_parameter_patterns=trainable_parameter_patterns,
+            frozen_parameter_patterns=frozen_parameter_patterns,
+        )
         self.enable_grad_norm = enable_grad_norm
         self.grad_norm_history = deque(maxlen=self.grad_norm_mad_window)
 
@@ -99,6 +106,61 @@ class ModelWrapper(LightningModule):
             data_schematic=data_schematic,
             viz_func=viz_func,
         )
+
+    @staticmethod
+    def _pattern_matches(name: str, patterns: list[str]) -> bool:
+        return any(fnmatch(name, pattern) or pattern in name for pattern in patterns)
+
+    def _apply_parameter_trainability(
+        self,
+        *,
+        trainable_parameter_patterns: list[str] | None,
+        frozen_parameter_patterns: list[str] | None,
+    ) -> None:
+        trainable_patterns = list(trainable_parameter_patterns or [])
+        frozen_patterns = list(frozen_parameter_patterns or [])
+        if not trainable_patterns and not frozen_patterns:
+            return
+
+        if trainable_patterns:
+            for _, param in self.named_parameters():
+                param.requires_grad = False
+            for name, param in self.named_parameters():
+                if self._pattern_matches(name, trainable_patterns):
+                    param.requires_grad = True
+
+        if frozen_patterns:
+            for name, param in self.named_parameters():
+                if self._pattern_matches(name, frozen_patterns):
+                    param.requires_grad = False
+
+        trainable = [
+            (name, param.numel())
+            for name, param in self.named_parameters()
+            if param.requires_grad
+        ]
+        frozen = sum(
+            param.numel() for _, param in self.named_parameters() if not param.requires_grad
+        )
+        trainable_count = sum(numel for _, numel in trainable)
+        if trainable_patterns and trainable_count == 0:
+            raise ValueError(
+                "trainable_parameter_patterns matched no parameters: "
+                f"{trainable_patterns}"
+            )
+
+        print(
+            "[ModelWrapper] trainable parameters: "
+            f"{trainable_count:,}; frozen parameters: {frozen:,}; "
+            f"patterns={trainable_patterns or '<unchanged>'}",
+            flush=True,
+        )
+
+    def _optimizer_parameters(self):
+        params = [p for p in self.trainer.model.parameters() if p.requires_grad]
+        if not params:
+            raise ValueError("No trainable parameters available for optimizer")
+        return params
 
     # batch is now a dict, handle on model side
     def training_step(self, batch, batch_idx):
@@ -262,7 +324,7 @@ class ModelWrapper(LightningModule):
             cfg = self._as_config(config_tree)
             optimizer = hydra.utils.instantiate(
                 cfg.model.optimizer,
-                params=self.trainer.model.parameters(),
+                params=self._optimizer_parameters(),
             )
             if callable(optimizer):
                 optimizer = optimizer()
@@ -277,7 +339,7 @@ class ModelWrapper(LightningModule):
             else:
                 scheduler = None
         else:
-            optimizer = self.hparams.optimizer(params=self.trainer.model.parameters())
+            optimizer = self.hparams.optimizer(params=self._optimizer_parameters())
             scheduler = (
                 self.hparams.scheduler(optimizer=optimizer)
                 if self.hparams.scheduler is not None

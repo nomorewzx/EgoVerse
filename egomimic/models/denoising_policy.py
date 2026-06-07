@@ -37,6 +37,26 @@ class DenoisingPolicy(nn.Module):
         self.padding = kwargs.get("padding", None)
         self.pooling = kwargs.get("pooling", None)
         self.model_type = kwargs.get("model_type", None)
+        self.normalize_action_dim_loss_weights = bool(
+            kwargs.get("normalize_action_dim_loss_weights", True)
+        )
+        action_dim_loss_weights = kwargs.get("action_dim_loss_weights", None)
+        if action_dim_loss_weights is None:
+            self.register_buffer(
+                "_action_dim_loss_weights", torch.empty(0), persistent=False
+            )
+        else:
+            weights = torch.as_tensor(action_dim_loss_weights, dtype=torch.float32)
+            if weights.ndim != 1:
+                raise ValueError(
+                    "action_dim_loss_weights must be a 1D list/tensor, got "
+                    f"shape {tuple(weights.shape)}"
+                )
+            if torch.any(weights < 0):
+                raise ValueError("action_dim_loss_weights must be non-negative")
+            if float(weights.sum()) <= 0.0:
+                raise ValueError("action_dim_loss_weights must have positive sum")
+            self.register_buffer("_action_dim_loss_weights", weights, persistent=False)
 
         if not infer_ac_dims:
             raise ValueError("infer_ac_dims must be a non-empty dict")
@@ -94,7 +114,22 @@ class DenoisingPolicy(nn.Module):
         """
         Computes loss, function to override for stuff like adaptive loss weighting
         """
-        return F.mse_loss(pred, target)
+        loss = F.mse_loss(pred, target, reduction="none")
+        weights = self._action_dim_loss_weights
+        if weights.numel() == 0:
+            return loss.mean()
+
+        if weights.numel() != loss.shape[-1]:
+            raise ValueError(
+                "action_dim_loss_weights length must match action dim: "
+                f"{weights.numel()} vs {loss.shape[-1]}"
+            )
+        view_shape = (1,) * (loss.ndim - 1) + (weights.numel(),)
+        weights = weights.to(device=loss.device, dtype=loss.dtype).view(view_shape)
+        loss = loss * weights
+        if self.normalize_action_dim_loss_weights:
+            loss = loss / weights.mean().clamp_min(1e-8)
+        return loss.mean()
 
     def preprocess_compute_loss(self, global_cond, data):
         if self.pooling == "mean":

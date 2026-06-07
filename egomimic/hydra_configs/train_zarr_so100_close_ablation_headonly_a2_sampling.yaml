@@ -1,0 +1,72 @@
+defaults:
+  - model: hpt_bc_so100_apricot_right_arm_cotrain_human_nogripper_weighted
+  - visualization: so100_apricot_right_arm_cotrain
+  - paths: default
+  - trainer: default
+  - logger: debug
+  - data: so100_singlearm_close_ablation_50_25_25
+  - callbacks: checkpoints
+  - data_schematic: so100_apricot_right_arm_cotrain
+  - override hydra/launcher: basic
+  - _self_
+
+name: so100_close_ablation
+description: a2_part12345_30k_so100_50_25_25_headonly_1x_steps5k
+ckpt_path: null
+init_from_checkpoint: ${oc.env:SO100_PART12345_30K_CKPT,/home/zxwang/repos/fork_egoverse/EgoVerse/logs/so100_apricot_cotrain/right_arm_human_indomain_part12345_xyz_only_init_part1234_30k_fm_paper_steps150k_2026-05-30_14-09-48/checkpoints/step_30000.ckpt}
+init_from_checkpoint_strict: true
+mode: train
+
+hydra:
+  run:
+    dir: ./logs/${name}/${description}_${now:%Y-%m-%d_%H-%M-%S}
+  sweep:
+    dir: ./logs/${name}/${description}_${now:%Y-%m-%d_%H-%M-%S}
+
+seed: 42
+reject_outliers: false
+evaluator: null
+
+model:
+  trainable_parameter_patterns:
+    - "nets.policy.heads.so100_singlearm.*"
+  optimizer:
+    lr: 1e-4
+  scheduler:
+    T_max: 5000
+
+trainer:
+  default_root_dir: ${hydra:runtime.output_dir}
+  accelerator: gpu
+  devices: 1
+  precision: bf16
+  max_epochs: -1
+  min_epochs: 0
+  max_steps: 5000
+  min_steps: 0
+  limit_train_batches: 1.0
+  limit_val_batches: 0
+  num_sanity_val_steps: 0
+  check_val_every_n_epoch: 1
+  deterministic: false
+
+logger:
+  csv:
+    _target_: lightning.pytorch.loggers.CSVLogger
+    save_dir: ${paths.output_dir}
+    name: csv
+
+callbacks:
+  model_checkpoint:
+    filename: step_{step}
+    auto_insert_metric_name: false
+    save_top_k: -1
+    save_last: true
+    every_n_train_steps: 1000
+    every_n_epochs: null
+
+norm_stats:
+  sample_frac: 1.0
+  num_workers: 4
+  save_cache_dir: ${hydra:runtime.output_dir}
+  precomputed_norm_path: ${oc.env:SO100_PART12345_NORM_STATS,/home/zxwang/repos/fork_egoverse/EgoVerse/logs/so100_apricot_cotrain/right_arm_human_indomain_part12345_xyz_only_init_part1234_30k_fm_paper_steps150k_2026-05-30_14-09-48/norm_stats}

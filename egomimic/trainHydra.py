@@ -5,6 +5,8 @@ import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+# ruff: noqa: E402
+
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
@@ -186,6 +188,9 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         data_schematic_state=data_schematic.to_state(),
         viz_func=viz_func_dict,
         scheduler_interval=cfg.model.get("scheduler_interval", "step"),
+        enable_grad_norm=cfg.model.get("enable_grad_norm", True),
+        trainable_parameter_patterns=cfg.model.get("trainable_parameter_patterns"),
+        frozen_parameter_patterns=cfg.model.get("frozen_parameter_patterns"),
     )
 
     _log_dataset_frame_counts(train_datasets, valid_datasets)
@@ -289,6 +294,7 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
             model=model,
             datamodule=datamodule,
             ckpt_path=cfg.get("ckpt_path"),
+            weights_only=False,
         )
     elif mode == "eval":
         eval_obj.trainer = trainer

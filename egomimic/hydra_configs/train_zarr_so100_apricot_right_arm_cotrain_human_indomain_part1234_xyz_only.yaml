@@ -1,0 +1,105 @@
+defaults:
+  - model: hpt_bc_so100_apricot_right_arm_cotrain_human_nogripper_weighted
+  - visualization: so100_apricot_right_arm_cotrain
+  - paths: default
+  - trainer: default
+  - logger: debug
+  - data: so100_apricot_right_arm_cotrain_human_indomain_part1234
+  - callbacks: checkpoints
+  - data_schematic: so100_apricot_right_arm_cotrain
+  - override hydra/launcher: basic
+  - _self_
+
+name: so100_apricot_cotrain
+description: right_arm_human_indomain_part1234_xyz_only_fm_paper_steps150k
+ckpt_path: null
+mode: train
+
+hydra:
+  run:
+    dir: ./logs/${name}/${description}_${now:%Y-%m-%d_%H-%M-%S}
+  sweep:
+    dir: ./logs/${name}/${description}_${now:%Y-%m-%d_%H-%M-%S}
+
+seed: 42
+reject_outliers: false
+evaluator: null
+
+trainer:
+  default_root_dir: ${hydra:runtime.output_dir}
+  accelerator: gpu
+  devices: 1
+  precision: bf16
+  max_epochs: -1
+  min_epochs: 0
+  max_steps: 150000
+  min_steps: 0
+  limit_train_batches: 1.0
+  limit_val_batches: 1.0
+  num_sanity_val_steps: 0
+  check_val_every_n_epoch: 1
+  deterministic: false
+
+data:
+  train_datasets:
+    so100_singlearm:
+      mode: train
+      valid_ratio: 0.1
+    ego_view_right_arm:
+      mode: train
+      valid_ratio: 0.1
+  valid_datasets:
+    so100_singlearm:
+      mode: valid
+      valid_ratio: 0.1
+    ego_view_right_arm:
+      mode: valid
+      valid_ratio: 0.1
+  train_dataloader_params:
+    so100_singlearm:
+      batch_size: 16
+      num_workers: 8
+    ego_view_right_arm:
+      batch_size: 16
+      num_workers: 8
+  valid_dataloader_params:
+    so100_singlearm:
+      batch_size: 16
+      num_workers: 4
+    ego_view_right_arm:
+      batch_size: 16
+      num_workers: 4
+
+model:
+  optimizer:
+    lr: 1e-4
+  scheduler:
+    T_max: 150000
+  robomimic_model:
+    head_specs:
+      ego_view_right_arm:
+        # Human no-gripper action layout is [x, y, z, yaw, pitch, roll].
+        # Keep human translation supervision and mask human rotation.
+        action_dim_loss_weights: [1, 1, 1, 0, 0, 0]
+        normalize_action_dim_loss_weights: true
+
+logger:
+  csv:
+    _target_: lightning.pytorch.loggers.CSVLogger
+    save_dir: ${paths.output_dir}
+    name: csv
+
+callbacks:
+  model_checkpoint:
+    filename: step_{step}
+    auto_insert_metric_name: false
+    save_top_k: -1
+    save_last: true
+    every_n_train_steps: 10000
+    every_n_epochs: null
+
+norm_stats:
+  sample_frac: 1.0
+  num_workers: 4
+  save_cache_dir: ${hydra:runtime.output_dir}
+  precomputed_norm_path: null

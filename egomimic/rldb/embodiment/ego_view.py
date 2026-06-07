@@ -11,6 +11,8 @@ from egomimic.rldb.zarr.action_chunk_transforms import (
     InterpolatePose,
     NumpyToTensor,
     PoseCoordinateFrameTransform,
+    SmoothPoseXYZInternalRatioAdaptive,
+    SmoothQuaternionPoseRotations,
     Transform,
     XYZWXYZ_to_XYZYPR,
 )
@@ -30,6 +32,20 @@ class EgoViewRightArm(Embodiment):
         mode: Literal["cartesian", "cartesian_no_gripper"] = "cartesian",
         chunk_length: int | None = None,
         stride: int | None = None,
+        smooth_action_rot: bool = False,
+        smooth_action_rot_window: int = 9,
+        smooth_action_rot_sigma: float | None = 2.0,
+        smooth_action_xyz_internal_ratio: bool = False,
+        smooth_action_xyz_window: int = 9,
+        smooth_action_xyz_sigma: float | None = 2.0,
+        smooth_action_xyz_ratio_window: int = 17,
+        smooth_action_xyz_ratio_smooth_window: int = 5,
+        smooth_action_xyz_ratio_smooth_sigma: float | None = 2.0,
+        smooth_action_xyz_ratio_threshold: float = 0.5,
+        smooth_action_xyz_residual_threshold_m: float = 0.003,
+        smooth_action_xyz_max_alpha: float = 1.0,
+        smooth_action_xyz_internal_margin: int | None = None,
+        smooth_action_xyz_min_sign_flips: int = 2,
     ) -> list[Transform]:
         if mode not in {"cartesian", "cartesian_no_gripper"}:
             raise ValueError(
@@ -40,6 +56,20 @@ class EgoViewRightArm(Embodiment):
             chunk_length=chunk_length or cls.ACTION_CHUNK_LENGTH,
             stride=stride or cls.ACTION_STRIDE,
             include_gripper=(mode == "cartesian"),
+            smooth_action_rot=smooth_action_rot,
+            smooth_action_rot_window=smooth_action_rot_window,
+            smooth_action_rot_sigma=smooth_action_rot_sigma,
+            smooth_action_xyz_internal_ratio=smooth_action_xyz_internal_ratio,
+            smooth_action_xyz_window=smooth_action_xyz_window,
+            smooth_action_xyz_sigma=smooth_action_xyz_sigma,
+            smooth_action_xyz_ratio_window=smooth_action_xyz_ratio_window,
+            smooth_action_xyz_ratio_smooth_window=smooth_action_xyz_ratio_smooth_window,
+            smooth_action_xyz_ratio_smooth_sigma=smooth_action_xyz_ratio_smooth_sigma,
+            smooth_action_xyz_ratio_threshold=smooth_action_xyz_ratio_threshold,
+            smooth_action_xyz_residual_threshold_m=smooth_action_xyz_residual_threshold_m,
+            smooth_action_xyz_max_alpha=smooth_action_xyz_max_alpha,
+            smooth_action_xyz_internal_margin=smooth_action_xyz_internal_margin,
+            smooth_action_xyz_min_sign_flips=smooth_action_xyz_min_sign_flips,
         )
 
     @classmethod
@@ -98,6 +128,20 @@ def _build_ego_view_right_arm_cartesian_transform_list(
     chunk_length: int = 64,
     stride: int = 1,
     include_gripper: bool = True,
+    smooth_action_rot: bool = False,
+    smooth_action_rot_window: int = 9,
+    smooth_action_rot_sigma: float | None = 2.0,
+    smooth_action_xyz_internal_ratio: bool = False,
+    smooth_action_xyz_window: int = 9,
+    smooth_action_xyz_sigma: float | None = 2.0,
+    smooth_action_xyz_ratio_window: int = 17,
+    smooth_action_xyz_ratio_smooth_window: int = 5,
+    smooth_action_xyz_ratio_smooth_sigma: float | None = 2.0,
+    smooth_action_xyz_ratio_threshold: float = 0.5,
+    smooth_action_xyz_residual_threshold_m: float = 0.003,
+    smooth_action_xyz_max_alpha: float = 1.0,
+    smooth_action_xyz_internal_margin: int | None = None,
+    smooth_action_xyz_min_sign_flips: int = 2,
 ) -> list[Transform]:
     """Build future observed right-hand pose chunks in the current head frame."""
     transforms: list[Transform] = [
@@ -107,21 +151,49 @@ def _build_ego_view_right_arm_cartesian_transform_list(
             transformed_key_name=action_headframe,
             mode="xyzwxyz",
         ),
-        PoseCoordinateFrameTransform(
-            target_world=target_world,
-            pose_world=obs_pose,
-            transformed_key_name=obs_headframe,
-            mode="xyzwxyz",
-        ),
-        XYZWXYZ_to_XYZYPR(keys=[action_headframe, obs_headframe]),
-        InterpolatePose(
-            new_chunk_length=chunk_length,
-            action_key=action_headframe,
-            output_action_key=action_headframe,
-            stride=stride,
-            mode="xyzypr",
-        ),
     ]
+    if smooth_action_rot:
+        transforms.append(
+            SmoothQuaternionPoseRotations(
+                pose_key=action_headframe,
+                window=smooth_action_rot_window,
+                sigma=smooth_action_rot_sigma,
+            )
+        )
+    if smooth_action_xyz_internal_ratio:
+        transforms.append(
+            SmoothPoseXYZInternalRatioAdaptive(
+                pose_key=action_headframe,
+                window=smooth_action_xyz_window,
+                sigma=smooth_action_xyz_sigma,
+                ratio_window=smooth_action_xyz_ratio_window,
+                ratio_smooth_window=smooth_action_xyz_ratio_smooth_window,
+                ratio_smooth_sigma=smooth_action_xyz_ratio_smooth_sigma,
+                ratio_threshold=smooth_action_xyz_ratio_threshold,
+                residual_threshold_m=smooth_action_xyz_residual_threshold_m,
+                max_alpha=smooth_action_xyz_max_alpha,
+                internal_margin=smooth_action_xyz_internal_margin,
+                min_sign_flips=smooth_action_xyz_min_sign_flips,
+            )
+        )
+    transforms.extend(
+        [
+            PoseCoordinateFrameTransform(
+                target_world=target_world,
+                pose_world=obs_pose,
+                transformed_key_name=obs_headframe,
+                mode="xyzwxyz",
+            ),
+            XYZWXYZ_to_XYZYPR(keys=[action_headframe, obs_headframe]),
+            InterpolatePose(
+                new_chunk_length=chunk_length,
+                action_key=action_headframe,
+                output_action_key=action_headframe,
+                stride=stride,
+                mode="xyzypr",
+            ),
+        ]
+    )
     if include_gripper:
         transforms.extend(
             [

@@ -4,7 +4,6 @@ import cv2
 import numpy as np
 import torch
 import zarr
-from numcodecs import VLenBytes
 
 from egomimic.rldb.embodiment.embodiment import get_embodiment_id
 from egomimic.rldb.embodiment.so100 import So100SingleArm
@@ -20,7 +19,7 @@ def _encode_jpeg(frame_bgr: np.ndarray) -> bytes:
 
 def _write_so100_zarr(root: Path) -> Path:
     episode_path = root / "so100_episode_000000.zarr"
-    store = zarr.open_group(str(episode_path), mode="w")
+    store = zarr.open_group(str(episode_path), mode="w", zarr_format=2)
 
     obs = np.array(
         [
@@ -33,22 +32,28 @@ def _write_so100_zarr(root: Path) -> Path:
         dtype=np.float32,
     )
     cmd = obs + np.array([0.5, 0.0, 0.0, 0.0, 0.0, 0.05, 10.0], dtype=np.float32)
-    store.create_dataset("obs_ee_pose_cam_rotvec", data=obs, chunks=(5, 7))
-    store.create_dataset("cmd_ee_pose_cam_rotvec", data=cmd, chunks=(5, 7))
+    force_proxy = np.arange(5 * 12, dtype=np.float32).reshape(5, 12)
+    store.create_dataset("obs_ee_pose_cam_rotvec", shape=obs.shape, data=obs, chunks=(5, 7))
+    store.create_dataset("cmd_ee_pose_cam_rotvec", shape=cmd.shape, data=cmd, chunks=(5, 7))
+    store.create_dataset(
+        "observations.state.force_proxy",
+        shape=force_proxy.shape,
+        data=force_proxy,
+        chunks=(5, 12),
+    )
 
-    encoded = np.empty((5,), dtype=object)
+    encoded_values = []
     for idx in range(5):
         frame = np.zeros((12, 16, 3), dtype=np.uint8)
         frame[..., 0] = idx * 20
         frame[..., 1] = 40
-        encoded[idx] = _encode_jpeg(frame)
+        encoded_values.append(_encode_jpeg(frame))
+    encoded = np.asarray(encoded_values, dtype=f"S{max(len(item) for item in encoded_values)}")
     store.create_dataset(
         "images.front_1",
         shape=(5,),
         chunks=(1,),
-        dtype=object,
-        object_codec=VLenBytes(),
-        fill_value=None,
+        dtype=encoded.dtype,
     )
     store["images.front_1"][:] = encoded
 
@@ -73,6 +78,11 @@ def _write_so100_zarr(root: Path) -> Path:
                     "dtype": "jpeg",
                     "shape": [12, 16, 3],
                     "names": ["height", "width", "channel"],
+                },
+                "observations.state.force_proxy": {
+                    "dtype": "float32",
+                    "shape": [12],
+                    "names": [f"force_{idx}" for idx in range(12)],
                 },
             },
         }
@@ -117,3 +127,33 @@ def test_so100_zarr_loads_and_emits_future_chunk(tmp_path: Path) -> None:
         atol=1e-6,
     )
     assert sample["actions_cartesian"][-1, 0] > sample["actions_cartesian"][0, 0]
+
+
+def test_so100_force_mode_loads_force_proxy(tmp_path: Path) -> None:
+    _write_so100_zarr(tmp_path)
+    resolver = LocalEpisodeResolver(
+        folder_path=tmp_path,
+        key_map=So100SingleArm.get_keymap(mode="camera_frame_ypr_force"),
+        transform_list=So100SingleArm.get_transform_list(
+            mode="camera_frame_ypr_force",
+            chunk_length=64,
+        ),
+    )
+    dataset = MultiDataset._from_resolver(
+        resolver=resolver,
+        filters=DatasetFilter(),
+        mode="total",
+        valid_ratio=0.0,
+    )
+
+    sample = dataset[0]
+
+    assert tuple(sample["observations.state.ee_pose"].shape) == (7,)
+    assert tuple(sample["observations.state.force_proxy"].shape) == (12,)
+    assert tuple(sample["actions_cartesian"].shape) == (64, 7)
+    assert torch.isfinite(sample["observations.state.force_proxy"]).all()
+    np.testing.assert_allclose(
+        sample["observations.state.force_proxy"].numpy(),
+        np.arange(12, dtype=np.float32),
+        atol=1e-6,
+    )

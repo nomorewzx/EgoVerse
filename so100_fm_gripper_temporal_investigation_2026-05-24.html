@@ -1,0 +1,1078 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>SO100 FM Header Gripper / Temporal Consistency Investigation</title>
+  <style>
+    :root {
+      --bg: #f7f8fa;
+      --panel: #ffffff;
+      --ink: #1c2430;
+      --muted: #5d6675;
+      --line: #d9dee7;
+      --strong: #0f766e;
+      --warn: #a15c00;
+      --bad: #b42318;
+      --blue: #225ea8;
+      --code: #f0f3f7;
+    }
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--ink);
+      font: 14px/1.55 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+    main {
+      max-width: 1180px;
+      margin: 0 auto;
+      padding: 28px 24px 64px;
+    }
+    header {
+      border-bottom: 1px solid var(--line);
+      padding-bottom: 18px;
+      margin-bottom: 22px;
+    }
+    h1 {
+      font-size: 28px;
+      line-height: 1.2;
+      margin: 0 0 10px;
+      letter-spacing: 0;
+    }
+    h2 {
+      font-size: 19px;
+      margin: 32px 0 10px;
+      border-bottom: 1px solid var(--line);
+      padding-bottom: 6px;
+    }
+    h3 {
+      font-size: 15px;
+      margin: 20px 0 8px;
+    }
+    p {
+      margin: 8px 0;
+    }
+    a {
+      color: var(--blue);
+      text-decoration: none;
+    }
+    a:hover {
+      text-decoration: underline;
+    }
+    .meta {
+      color: var(--muted);
+    }
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+      gap: 12px;
+      margin: 14px 0;
+    }
+    .card {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 14px;
+    }
+    .card h3 {
+      margin-top: 0;
+    }
+    .tag {
+      display: inline-block;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      padding: 1px 8px;
+      background: #fff;
+      color: var(--muted);
+      font-size: 12px;
+      margin-right: 4px;
+    }
+    .ok { color: var(--strong); font-weight: 650; }
+    .warn { color: var(--warn); font-weight: 650; }
+    .bad { color: var(--bad); font-weight: 650; }
+    code, pre {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+      background: var(--code);
+    }
+    code {
+      padding: 1px 4px;
+      border-radius: 4px;
+    }
+    pre {
+      padding: 12px;
+      border-radius: 8px;
+      overflow-x: auto;
+      border: 1px solid var(--line);
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      background: var(--panel);
+      margin: 12px 0 18px;
+      border: 1px solid var(--line);
+    }
+    th, td {
+      border-bottom: 1px solid var(--line);
+      padding: 8px 9px;
+      text-align: left;
+      vertical-align: top;
+    }
+    th {
+      background: #edf1f6;
+      font-weight: 700;
+    }
+    tr:last-child td {
+      border-bottom: 0;
+    }
+    .num {
+      text-align: right;
+      white-space: nowrap;
+      font-variant-numeric: tabular-nums;
+    }
+    .small {
+      font-size: 12px;
+      color: var(--muted);
+    }
+    .note {
+      border-left: 4px solid var(--blue);
+      background: #edf5ff;
+      padding: 10px 12px;
+      margin: 12px 0;
+    }
+    .warningbox {
+      border-left: 4px solid var(--warn);
+      background: #fff7e8;
+      padding: 10px 12px;
+      margin: 12px 0;
+    }
+    .toc a {
+      display: inline-block;
+      margin: 0 14px 6px 0;
+    }
+  </style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>SO100 FM Header Gripper / Temporal Consistency Investigation</h1>
+    <p class="meta">记录日期：2026-05-24。范围：SO100 apricot pick/place，HPT MLP header vs FM/flow-matching header，SO100-only 训练与后续 rollout/probe。</p>
+    <div class="toc">
+      <a href="#summary">Executive Summary</a>
+      <a href="#timeline">Timeline</a>
+      <a href="#gripper">Gripper Early Release</a>
+      <a href="#loss">5x Loss</a>
+      <a href="#temporal">Temporal Consistency</a>
+      <a href="#rollout">Rollout Strategy</a>
+      <a href="#artifacts">Artifacts</a>
+    </div>
+  </header>
+
+  <section id="summary">
+    <h2>Executive Summary</h2>
+    <div class="grid">
+      <div class="card">
+        <h3>1. Early release was real, but the first metric was too blunt</h3>
+        <p>FM header rollout showed a visible failure mode: after grasping apricot, gripper command could reopen too early. The initial scalar probe <code>drop &gt; 8</code> over all future tokens over-counted normal place/release behavior. We later restricted the metric to <code>closed_hold</code> validation states and added sequence metrics such as sustained release run and tail collapse.</p>
+      </div>
+      <div class="card">
+        <h3>2. Gripper is a special action dimension</h3>
+        <p>SO100 gripper distribution is long open/closed holds plus sparse transitions. This is unlike pose dimensions. Literature and LeRobot practice support treating gripper carefully: LeRobot defaults to absolute actions and explicitly excludes gripper from relative encoding because gripper commands are typically binary open/close.</p>
+      </div>
+      <div class="card">
+        <h3>3. Gripper 5x loss helped the release failure</h3>
+        <p>The implemented intervention was <code>action_dim_loss_weights: [1, 1, 1, 1, 1, 1, 5]</code> for the FM head. On the refined closed-hold probe, FM gripper5x 80k reduced qf33 early release to zero unique closed-hold samples. In hardware rollout, the original “grasp then immediately release” failure was not observed after this change.</p>
+      </div>
+      <div class="card">
+        <h3>4. Remaining FM problem is pose/chunk consistency</h3>
+        <p>After gripper loss was improved, FM success rate was still below MLP. Validation-state probes showed that FM can have competitive GT action error but worse chunk-to-chunk temporal consistency. With the latest official-style resample rollout metric, FM gripper5x 60k is still about <span class="bad">2.3x</span> worse than MLP on position consistency and <span class="bad">2.8x</span> worse on rotation consistency. This is evidence for a candidate failure mechanism, not proof that mean mm-level discontinuity alone explains rollout success.</p>
+      </div>
+      <div class="card">
+        <h3>5. Rollout time scale was mismatched</h3>
+        <p>SO100 training reads a raw future action horizon of 30 and interpolates it into 100 action tokens. The old SO100 rollout used raw token stride selection. EgoVerse official rollout instead resamples predicted chunks to 45 and executes 30 steps before re-querying. We changed SO100 rollout to match that pattern.</p>
+      </div>
+      <div class="card">
+        <h3>Current conclusion</h3>
+        <p>The official-style rollout and <code>blend5_pose_only</code> both improve command smoothness, and blend5 reduces real query-boundary pose jumps by about 5x. Since the blend5 hardware rollout still failed, temporal inconsistency is no longer the primary bottleneck. The latest log/video check points to approach/contact geometry plus gripper phase timing: the gripper reaches the closed threshold before a reliable capture, then later opens without a confirmed lift.</p>
+      </div>
+    </div>
+  </section>
+
+  <section id="timeline">
+    <h2>Timeline Of Findings</h2>
+    <table>
+      <thead>
+        <tr>
+          <th>Stage</th>
+          <th>Observation</th>
+          <th>Action / Diagnostic</th>
+          <th>Conclusion</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>Initial FM rollout</td>
+          <td>FM header model visibly released apricot shortly after grasp.</td>
+          <td>Added richer rollout logging: raw prediction chunk, selected/executed gripper chunk, clipped/sent gripper values, current gripper, video path if recording.</td>
+          <td>Failure was not obviously caused by clipping alone; raw FM gripper sequence could command a release-like drop.</td>
+        </tr>
+        <tr>
+          <td>Model comparison</td>
+          <td>MLP SO100-only, MLP co-train, and FM SO100-only baseline did not show the same obvious release in earlier rollouts, while FM co-train showed it.</td>
+          <td>Moved away from anecdotal rollout-only comparison and built same-val-state gripper probes.</td>
+          <td>Need compare models on the same validation states, especially closed-hold states.</td>
+        </tr>
+        <tr>
+          <td>Metric correction</td>
+          <td><code>drop &gt; 8</code> over all future tokens can mark correct place/release motions as “bad”.</td>
+          <td>Refined probe to closed-hold states: current gripper closed and GT future mostly remains closed. Added sequence metrics: any release, sustained run, release area, tail collapse.</td>
+          <td>The final target is not “zero drop anywhere”; it is “no premature drop while GT says hold closed”.</td>
+        </tr>
+        <tr>
+          <td>Loss intervention</td>
+          <td>Gripper has sparse transitions and long plateaus, so unweighted MSE can under-emphasize the dimension that decides grasp success.</td>
+          <td>Implemented action-dim loss weights for denoising/FM heads and trained SO100-only FM gripper5x to 60k, then resumed to 80k.</td>
+          <td>Closed-hold qf33 early release improved substantially; 80k eliminated it in the probe.</td>
+        </tr>
+        <tr>
+          <td>Success-rate issue remained</td>
+          <td>Even when early gripper release was not observed, FM pick/place success remained lower than MLP.</td>
+          <td>Built action-quality probe comparing GT action error and receding-horizon temporal consistency on the same validation states.</td>
+          <td>FM had acceptable GT error but substantially worse chunk-to-chunk consistency.</td>
+        </tr>
+        <tr>
+          <td>Rollout strategy audit</td>
+          <td>SO100 training chunk construction interpolates 30 raw future actions to 100 tokens. Old rollout with <code>action_stride=1</code> stretched the trajectory; <code>stride=3</code> was a rough compression.</td>
+          <td>Checked EgoVerse official <code>robot/rollout.py</code>: default 30Hz, query every 30 steps, resample chunk to 45.</td>
+          <td>SO100 rollout was changed to official-style <code>100 -&gt; 45</code> interpolation and execute first 30 steps.</td>
+        </tr>
+        <tr>
+          <td>Blend5 hardware test</td>
+          <td><code>blend5_pose_only</code> reduced real command-boundary pose jumps by about 5x but still did not produce a successful pick/place.</td>
+          <td>Compared no-blend resample45 and blend5 rollout logs after IK/safety clipping.</td>
+          <td>Temporal boundary discontinuity is unlikely to be the primary remaining bottleneck.</td>
+        </tr>
+        <tr>
+          <td>Approach video/log check</td>
+          <td>In the blend5 rollout, gripper reached the closed threshold around 2.0s while the wrist was still approaching from the right/upper-right side, then opened around 8.0s without a confirmed lift.</td>
+          <td>Aligned rollout JSONL gripper/IK fields with the recorded video frames around approach and first contact.</td>
+          <td>Current strongest rollout-level hypothesis is approach/contact geometry plus a script-like close/hold/open schedule without grasp confirmation.</td>
+        </tr>
+      </tbody>
+    </table>
+  </section>
+
+  <section id="gripper">
+    <h2>Gripper Early Release Investigation</h2>
+    <h3>What “early release” means in the refined probe</h3>
+    <p>The useful validation set for this question is not all samples. It is a closed-hold subset where the current gripper is already closed and the ground-truth future sequence says it should remain closed.</p>
+    <pre><code>closed_hold if:
+  state_gripper &gt;= 30
+  min(gt_gripper_future) &gt;= state_gripper - 3
+
+release-like prediction if:
+  state_gripper - pred_gripper &gt; 8</code></pre>
+    <p>The sequence version also checks whether release is sustained, where it starts, and whether the tail mean collapses. This matters because one isolated token just over threshold is much less serious than a long run of release commands.</p>
+
+    <div class="warningbox">
+      <p><strong>Caveat from the investigation:</strong> <code>drop &gt; 8</code> over a long future horizon is not by itself a bug. In a pick-place task, later tokens may correctly open the gripper for placement. The more reliable target is closed-hold early release, especially early or sustained drops while GT is still holding.</p>
+    </div>
+
+    <h3>Closed-hold probe results</h3>
+    <p>Probe source: <a href="egomimic/scripts/diagnostics/probe_so100_val_gripper_release.py">egomimic/scripts/diagnostics/probe_so100_val_gripper_release.py</a>. Output summary: <a href="logs/so100_hpt/val_gripper_probe/sequence_metrics_comparison_2026-05-24.csv">sequence_metrics_comparison_2026-05-24.csv</a>.</p>
+    <table>
+      <thead>
+        <tr>
+          <th>Model</th>
+          <th>Horizon</th>
+          <th class="num">Closed-hold samples</th>
+          <th class="num">Any release unique</th>
+          <th class="num">Sustained run unique</th>
+          <th class="num">Tail collapse unique</th>
+          <th class="num">First release median</th>
+          <th>Interpretation</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>FM baseline 60k</td>
+          <td><code>qf33</code></td>
+          <td class="num">192</td>
+          <td class="num">1</td>
+          <td class="num">1</td>
+          <td class="num">1</td>
+          <td class="num">25.0</td>
+          <td>Small but real closed-hold release signal.</td>
+        </tr>
+        <tr>
+          <td>FM gripper5x 60k</td>
+          <td><code>qf33</code></td>
+          <td class="num">192</td>
+          <td class="num">1</td>
+          <td class="num">0</td>
+          <td class="num">0</td>
+          <td class="num">32.0</td>
+          <td>Release becomes isolated and non-sustained.</td>
+        </tr>
+        <tr>
+          <td>FM gripper5x 80k</td>
+          <td><code>qf33</code></td>
+          <td class="num">192</td>
+          <td class="num">0</td>
+          <td class="num">0</td>
+          <td class="num">0</td>
+          <td class="num">-</td>
+          <td><span class="ok">Closed-hold early release eliminated in this probe.</span></td>
+        </tr>
+        <tr>
+          <td>MLP 80k</td>
+          <td><code>qf33</code></td>
+          <td class="num">192</td>
+          <td class="num">4</td>
+          <td class="num">1</td>
+          <td class="num">1</td>
+          <td class="num">32.5</td>
+          <td>Not perfectly zero numerically, but did not show the same hardware failure mode.</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <p>The older <code>qf99_stride3</code> numbers remain useful for long-horizon inspection, but they include late-horizon release/place-like behavior. For example FM gripper5x 80k still has 18 unique <code>qf99_stride3</code> drops over threshold, but the refined <code>qf33</code> early-hold metric is zero. This is why the investigation stopped using “clear all drop&gt;8” as the objective.</p>
+  </section>
+
+  <section id="loss">
+    <h2>Gripper 5x Loss Implementation</h2>
+    <p>The implemented change is generic action-dimension weighting in the denoising/FM policy loss. Source: <a href="egomimic/models/denoising_policy.py">egomimic/models/denoising_policy.py</a>.</p>
+    <pre><code>loss = mse(pred, target, reduction="none")
+loss = loss * action_dim_loss_weights
+if normalize_action_dim_loss_weights:
+    loss = loss / mean(action_dim_loss_weights)
+return mean(loss)</code></pre>
+    <p>Experiment config: <a href="egomimic/hydra_configs/train_zarr_so100_singlearm_fm_gripper5x_steps60k.yaml">train_zarr_so100_singlearm_fm_gripper5x_steps60k.yaml</a>.</p>
+    <pre><code>action_dim_loss_weights: [1, 1, 1, 1, 1, 1, 5]
+normalize_action_dim_loss_weights: true
+max_steps: 60000
+valid_ratio: 0.1</code></pre>
+    <p>Because normalization is enabled, the absolute loss scale is kept roughly stable. The average weight is <code>11/7 = 1.571</code>, so the effective multipliers are approximately:</p>
+    <table>
+      <thead>
+        <tr>
+          <th>Dimension group</th>
+          <th>Raw weight</th>
+          <th>Effective weight after divide by mean</th>
+          <th>Relative to non-gripper</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>xyz + yaw/pitch/roll</td>
+          <td class="num">1</td>
+          <td class="num">0.636</td>
+          <td class="num">1x</td>
+        </tr>
+        <tr>
+          <td>gripper</td>
+          <td class="num">5</td>
+          <td class="num">3.182</td>
+          <td class="num">5x</td>
+        </tr>
+      </tbody>
+    </table>
+    <p>This is not a separate gripper head or a classification objective. It is the smallest intervention that kept architecture and data unchanged while forcing the FM objective to care more about gripper error.</p>
+
+    <h3>External evidence and caveat</h3>
+    <p>The broader evidence does not prove a theorem that diffusion/FM must be worse at grippers. It supports a narrower engineering point: gripper commands often have binary or long-hold structure, so treating them exactly like smooth pose dimensions can be fragile.</p>
+    <ul>
+      <li>LeRobot action representation docs state that absolute actions are the default and that gripper commands are typically binary open/close and do not benefit from relative encoding: <a href="https://huggingface.co/docs/lerobot/action_representations">LeRobot Action Representations</a>.</li>
+      <li>Diffusion Policy introduces action-sequence generation with receding-horizon control, which makes chunk execution details central to policy behavior: <a href="https://arxiv.org/abs/2303.04137">Diffusion Policy, Chi et al.</a>.</li>
+      <li>Recent flow/diffusion follow-up work explicitly targets streaming/tighter loops because sampling full trajectories before execution can be a bottleneck for receding-horizon control: <a href="https://arxiv.org/abs/2505.21851">Streaming Flow Policy</a>.</li>
+      <li>A diffusion-policy component study also identifies action sequence execution and receding horizon as core components, matching our finding that rollout semantics are not a minor detail: <a href="https://arxiv.org/abs/2412.00084">Unpacking the Individual Components of Diffusion Policy</a>.</li>
+    </ul>
+  </section>
+
+  <section id="temporal">
+    <h2>Temporal Consistency Investigation</h2>
+    <h3>Metric definition</h3>
+    <p>For two adjacent validation states from the same episode, at dataset indices <code>t</code> and <code>t+1</code>, let the predicted action chunks be:</p>
+    <pre><code>P_t[0:H], P_{t+1}[0:H]</code></pre>
+    <p>A receding-horizon policy is temporally consistent if the future plan from the first query agrees with the next query after shifting by one step:</p>
+    <pre><code>consistency_error_i = P_t[i + 1] - P_{t+1}[i]</code></pre>
+    <p>We summarize:</p>
+    <pre><code>pos_consistency = mean_i || error_i[x,y,z] ||_2
+rot_consistency = mean_i || error_i[yaw,pitch,roll] ||_2
+z_consistency   = mean_i | error_i[z] |
+grip_consistency = mean_i | error_i[gripper] |</code></pre>
+    <p>Probe source: <a href="egomimic/scripts/diagnostics/probe_so100_val_action_quality.py">probe_so100_val_action_quality.py</a>. Latest output: <a href="logs/so100_hpt/val_action_quality_probe/so100_mlp_vs_fm_action_quality_resample45_2026-05-24_summary.json">so100_mlp_vs_fm_action_quality_resample45_2026-05-24_summary.json</a>.</p>
+
+    <h3>Same validation set</h3>
+    <table>
+      <tbody>
+        <tr><th>Dataset root</th><td><code>/home/zxwang/so100-ee-cam-egoverse-zarr</code></td></tr>
+        <tr><th>Split</th><td><code>valid_ratio = 0.1</code></td></tr>
+        <tr><th>Action-quality samples</th><td>768 samples, stratified across <code>closing_grasp</code>, <code>closed_hold</code>, <code>transition</code>, <code>release_place</code>, <code>open_hold_approach</code></td></tr>
+        <tr><th>Consistency pairs</th><td>256 adjacent validation-state pairs</td></tr>
+        <tr><th>Models</th><td>MLP 80k, FM baseline 60k, FM gripper5x 60k, FM gripper5x 80k</td></tr>
+      </tbody>
+    </table>
+
+    <h3>GT action error under official-style rollout horizon</h3>
+    <p>This table explains why the remaining issue is not simply “FM has worse one-chunk GT error.” Under <code>rollout_resample45_exec30</code>, FM pose error is not worse than MLP; temporal consistency is where it falls behind.</p>
+    <table>
+      <thead>
+        <tr>
+          <th>Model</th>
+          <th class="num">Position error mean</th>
+          <th class="num">Rotation error mean</th>
+          <th class="num">Gripper abs error mean</th>
+          <th class="num">Pred/GT delta ratio</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr><td>MLP 80k</td><td class="num">0.02322 m</td><td class="num">0.10812</td><td class="num">3.454</td><td class="num">1.559</td></tr>
+        <tr><td>FM baseline 60k</td><td class="num">0.01945 m</td><td class="num">0.10786</td><td class="num">3.388</td><td class="num">1.275</td></tr>
+        <tr><td>FM gripper5x 60k</td><td class="num">0.01924 m</td><td class="num">0.10377</td><td class="num">3.229</td><td class="num">1.227</td></tr>
+        <tr><td>FM gripper5x 80k</td><td class="num">0.01984 m</td><td class="num">0.10756</td><td class="num">3.319</td><td class="num">1.274</td></tr>
+      </tbody>
+    </table>
+
+    <h3>Temporal consistency before/after official-style resampling</h3>
+    <p>Old real execution approximation: <code>rollout_stride3_exec</code>, raw indices <code>1,4,7,...</code>. New official-style metric: <code>rollout_resample45_exec30</code>, interpolate chunk to 45 then execute first 30.</p>
+    <table>
+      <thead>
+        <tr>
+          <th>Model</th>
+          <th class="num">Position old -&gt; new</th>
+          <th class="num">Rotation old -&gt; new</th>
+          <th class="num">Z old -&gt; new</th>
+          <th class="num">Gripper old -&gt; new</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>MLP 80k</td>
+          <td class="num">4.11mm -&gt; 3.24mm <span class="ok">(+21.0%)</span></td>
+          <td class="num">0.0191 -&gt; 0.0145 <span class="ok">(+24.1%)</span></td>
+          <td class="num">1.58mm -&gt; 1.20mm <span class="ok">(+24.1%)</span></td>
+          <td class="num">0.525 -&gt; 0.476 <span class="ok">(+9.3%)</span></td>
+        </tr>
+        <tr>
+          <td>FM baseline 60k</td>
+          <td class="num">7.76mm -&gt; 7.23mm <span class="ok">(+6.8%)</span></td>
+          <td class="num">0.0412 -&gt; 0.0390 <span class="ok">(+5.4%)</span></td>
+          <td class="num">2.71mm -&gt; 2.51mm <span class="ok">(+7.3%)</span></td>
+          <td class="num">1.011 -&gt; 1.009 <span class="ok">(+0.2%)</span></td>
+        </tr>
+        <tr>
+          <td>FM gripper5x 60k</td>
+          <td class="num">8.11mm -&gt; 7.41mm <span class="ok">(+8.6%)</span></td>
+          <td class="num">0.0435 -&gt; 0.0411 <span class="ok">(+5.4%)</span></td>
+          <td class="num">2.76mm -&gt; 2.60mm <span class="ok">(+5.8%)</span></td>
+          <td class="num">0.666 -&gt; 0.660 <span class="ok">(+0.9%)</span></td>
+        </tr>
+        <tr>
+          <td>FM gripper5x 80k</td>
+          <td class="num">9.42mm -&gt; 8.70mm <span class="ok">(+7.7%)</span></td>
+          <td class="num">0.0514 -&gt; 0.0493 <span class="ok">(+4.2%)</span></td>
+          <td class="num">3.19mm -&gt; 2.96mm <span class="ok">(+7.2%)</span></td>
+          <td class="num">0.826 -&gt; 0.815 <span class="ok">(+1.4%)</span></td>
+        </tr>
+      </tbody>
+    </table>
+
+    <h3>Remaining MLP/FM gap after the rollout fix: mean / p95 / max</h3>
+    <div class="warningbox">
+      <p><strong>This table is not GT error.</strong> It does not compare predictions against dataset ground truth actions. It compares two consecutive model predictions against each other: <code>P_t[i + 1]</code> from the chunk predicted at validation state <code>t</code> versus <code>P_{t+1}[i]</code> from the chunk predicted at the next validation state. The numbers measure chunk-to-chunk discontinuity when the policy re-queries.</p>
+    </div>
+    <p class="small">Here “tail” means the tail of the sample distribution. Each adjacent validation-state pair produces one average consistency value. The table reports mean, p95, and max over those pairs. It is not the tail token region of a single action chunk.</p>
+    <table>
+      <thead>
+        <tr>
+          <th>Model</th>
+          <th class="num">Position mean / p95 / max</th>
+          <th class="num">Rotation mean / p95 / max</th>
+          <th class="num">Z mean / p95 / max</th>
+          <th class="num">Gripper mean / p95 / max</th>
+          <th>Vs MLP 80k</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>MLP 80k</td>
+          <td class="num">3.24 / 7.45 / 34.04 mm</td>
+          <td class="num">0.0145 / 0.0320 / 0.1480</td>
+          <td class="num">1.20 / 3.19 / 15.66 mm</td>
+          <td class="num">0.476 / 1.737 / 12.155</td>
+          <td>baseline</td>
+        </tr>
+        <tr>
+          <td>FM baseline 60k</td>
+          <td class="num">7.23 / 13.29 / 20.89 mm</td>
+          <td class="num">0.0390 / 0.0745 / 0.1673</td>
+          <td class="num">2.51 / 6.02 / 12.88 mm</td>
+          <td class="num">1.009 / 2.690 / 8.623</td>
+          <td>2.23x pos mean, 2.69x rot mean</td>
+        </tr>
+        <tr>
+          <td>FM gripper5x 60k</td>
+          <td class="num">7.41 / 14.52 / 27.85 mm</td>
+          <td class="num">0.0411 / 0.0811 / 0.2398</td>
+          <td class="num">2.60 / 6.37 / 17.69 mm</td>
+          <td class="num">0.660 / 2.087 / 4.762</td>
+          <td>2.29x pos mean, 2.83x rot mean</td>
+        </tr>
+        <tr>
+          <td>FM gripper5x 80k</td>
+          <td class="num">8.70 / 16.90 / 25.70 mm</td>
+          <td class="num">0.0493 / 0.0974 / 0.2506</td>
+          <td class="num">2.96 / 6.74 / 18.65 mm</td>
+          <td class="num">0.815 / 2.423 / 5.867</td>
+          <td>2.68x pos mean, 3.40x rot mean</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <h3>Detailed temporal consistency percentiles</h3>
+    <p class="small">Same metric and horizon as above: <code>rollout_resample45_exec30</code>. Format is <code>p25 / median / p75 / p95 / max</code>. Position and Z are in millimeters; rotation is radians; gripper is in the dataset gripper command unit.</p>
+    <table>
+      <thead>
+        <tr>
+          <th>Model</th>
+          <th class="num">Position p25 / med / p75 / p95 / max</th>
+          <th class="num">Rotation p25 / med / p75 / p95 / max</th>
+          <th class="num">Z p25 / med / p75 / p95 / max</th>
+          <th class="num">Gripper p25 / med / p75 / p95 / max</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>MLP 80k</td>
+          <td class="num">1.55 / 2.52 / 3.92 / 7.45 / 34.04</td>
+          <td class="num">0.0074 / 0.0109 / 0.0167 / 0.0320 / 0.1480</td>
+          <td class="num">0.42 / 0.81 / 1.42 / 3.19 / 15.66</td>
+          <td class="num">0.095 / 0.194 / 0.452 / 1.737 / 12.155</td>
+        </tr>
+        <tr>
+          <td>FM baseline 60k</td>
+          <td class="num">4.73 / 6.71 / 8.97 / 13.29 / 20.89</td>
+          <td class="num">0.0250 / 0.0345 / 0.0484 / 0.0745 / 0.1673</td>
+          <td class="num">1.22 / 2.07 / 3.29 / 6.02 / 12.88</td>
+          <td class="num">0.442 / 0.759 / 1.168 / 2.690 / 8.623</td>
+        </tr>
+        <tr>
+          <td>FM gripper5x 60k</td>
+          <td class="num">4.91 / 6.52 / 9.06 / 14.52 / 27.85</td>
+          <td class="num">0.0254 / 0.0359 / 0.0511 / 0.0811 / 0.2398</td>
+          <td class="num">1.26 / 2.03 / 3.20 / 6.37 / 17.69</td>
+          <td class="num">0.236 / 0.423 / 0.794 / 2.087 / 4.762</td>
+        </tr>
+        <tr>
+          <td>FM gripper5x 80k</td>
+          <td class="num">5.77 / 7.83 / 10.68 / 16.90 / 25.70</td>
+          <td class="num">0.0299 / 0.0420 / 0.0624 / 0.0974 / 0.2506</td>
+          <td class="num">1.46 / 2.40 / 3.81 / 6.74 / 18.65</td>
+          <td class="num">0.300 / 0.561 / 0.983 / 2.423 / 5.867</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <div class="note">
+      <p><strong>Interpretation:</strong> official-style resampling is the right rollout semantics for this codebase, and it improves smoothness. It does not make FM behave like MLP. In the validation probe, FM still has a large relative receding-horizon continuity gap, especially pose and rotation.</p>
+      <p><strong>Possible gripper-weight trade-off:</strong> gripper 5x loss improves closed-hold early release, but the percentile table suggests a possible cost in pose/rotation consistency. Compared with FM baseline 60k, FM gripper5x 60k has position p95 14.52mm vs 13.29mm, rotation p95 0.0811 vs 0.0745, position max 27.85mm vs 20.89mm, and rotation max 0.2398 vs 0.1673. This is not strict causal proof because the models are separate training runs, but it is a useful warning: increasing gripper loss may shift optimization pressure away from smooth pose chunk consistency.</p>
+      <p><strong>Important caveat:</strong> the mean position discontinuity is not huge in absolute terms. For example, MLP 80k is 3.24mm and FM gripper5x 60k is 7.41mm under <code>rollout_resample45_exec30</code>. The extra mean gap is about 4.17mm, which by itself should not be treated as a complete explanation for failed pick/place. The more concerning parts are the tails and rotations: FM gripper5x 60k has position p95 14.5mm and rotation p95 0.081rad, while MLP has position p95 7.44mm and rotation p95 0.031rad. On <code>closed_hold</code> states, FM gripper5x 60k reaches position p95 17.4mm and rotation p95 0.089rad.</p>
+      <p>The next stronger test is not another averaged validation metric. It is to compute the actual executed command boundary jump in successful vs failed rollout logs: last executed command from chunk k versus first executed command from chunk k+1, after IK/safety clipping. That would directly answer whether chunk discontinuity is large at the hardware command boundary where failures happen.</p>
+    </div>
+
+    <h3>Rollout-time smoothing strategies: offline probe</h3>
+    <p>A second probe evaluates inference/rollout-side fixes without retraining. Source: <a href="egomimic/scripts/diagnostics/probe_so100_rollout_smoothing.py">probe_so100_rollout_smoothing.py</a>. Output: <a href="logs/so100_hpt/val_rollout_smoothing_probe/so100_mlp_vs_fm_rollout_smoothing_poseonly_2026-05-24_summary.json">so100_mlp_vs_fm_rollout_smoothing_poseonly_2026-05-24_summary.json</a>.</p>
+    <p>The probe uses validation pairs separated by <code>query_gap=30</code> to approximate one official rollout re-query interval. For each pair it compares the old plan's next post-query target against the new query chunk. The main metrics are:</p>
+    <pre><code>replan jump: old_chunk[30] vs new_exec[0]
+GT error:    new_exec[0:30] vs validation GT chunk at the new state</code></pre>
+    <p>Because blending the gripper can reintroduce release behavior, the main smoothing variants below are <strong>pose-only</strong>: blend/ensemble applies to <code>x,y,z,yaw,pitch,roll</code>, while gripper remains the new chunk's gripper output.</p>
+
+    <table>
+      <thead>
+        <tr>
+          <th>FM gripper5x 60k strategy</th>
+          <th class="num">Replan position mean / p95</th>
+          <th class="num">Replan rotation mean / p95</th>
+          <th class="num">GT position mean / p95</th>
+          <th class="num">GT rotation mean / p95</th>
+          <th class="num">Closed-hold release count</th>
+          <th>Read</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><code>direct_seed0</code></td>
+          <td class="num">49.05 / 128.27 mm</td>
+          <td class="num">0.218 / 0.607</td>
+          <td class="num">18.72 / 43.32 mm</td>
+          <td class="num">0.098 / 0.213</td>
+          <td class="num">4 / 80</td>
+          <td>Baseline re-query behavior.</td>
+        </tr>
+        <tr>
+          <td><code>blend5_pose_only</code></td>
+          <td class="num">9.81 / 25.65 mm</td>
+          <td class="num">0.044 / 0.121</td>
+          <td class="num">20.97 / 43.27 mm</td>
+          <td class="num">0.107 / 0.230</td>
+          <td class="num">4 / 80</td>
+          <td>80% lower replan jump, GT position +12%, gripper release unchanged.</td>
+        </tr>
+        <tr>
+          <td><code>blend10_pose_only</code></td>
+          <td class="num">4.90 / 12.83 mm</td>
+          <td class="num">0.022 / 0.061</td>
+          <td class="num">23.73 / 45.45 mm</td>
+          <td class="num">0.119 / 0.244</td>
+          <td class="num">4 / 80</td>
+          <td>Very smooth but likely too much lag: GT position +27%.</td>
+        </tr>
+        <tr>
+          <td><code>temporal_ensemble_pose_only15</code></td>
+          <td class="num">24.52 / 64.13 mm</td>
+          <td class="num">0.109 / 0.304</td>
+          <td class="num">26.17 / 53.74 mm</td>
+          <td class="num">0.130 / 0.264</td>
+          <td class="num">4 / 80</td>
+          <td>Halfway smoothing, but GT error penalty is large.</td>
+        </tr>
+        <tr>
+          <td><code>sample_mean_k</code></td>
+          <td class="num">48.57 / 123.32 mm</td>
+          <td class="num">0.218 / 0.611</td>
+          <td class="num">18.47 / 42.78 mm</td>
+          <td class="num">0.097 / 0.224</td>
+          <td class="num">4 / 80</td>
+          <td>Little smoothness gain; no meaningful GT penalty.</td>
+        </tr>
+        <tr>
+          <td><code>best_of_k_pose</code></td>
+          <td class="num">46.49 / 120.34 mm</td>
+          <td class="num">0.208 / 0.582</td>
+          <td class="num">18.69 / 42.57 mm</td>
+          <td class="num">0.100 / 0.221</td>
+          <td class="num">4 / 80</td>
+          <td>Safest K-sample option, but only 5-6% smoothness gain.</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <div class="warningbox">
+      <p><strong>Current read:</strong> rollout-side smoothing is not an obvious free fix. Pose-only <code>blend5</code> is the only candidate worth a careful hardware test: it greatly reduces boundary jump and does not change closed-hold release count, but it adds about 12% GT position error and 10% GT rotation error in the offline probe. <code>blend10</code> and equal temporal ensembling look too laggy. K-sample selection is safe but the improvement is small relative to the 4x inference cost.</p>
+      <p>Also, under the <code>query_gap=30</code> boundary metric, MLP has a large direct replan jump too. This means boundary jump alone still does not isolate the FM success-rate gap. The strongest next check remains real rollout logs: compare command boundary jumps in successful MLP rollouts and failed FM rollouts after IK/safety clipping.</p>
+    </div>
+  </section>
+
+  <section id="rollout">
+    <h2>Training Action Chunk vs Rollout Strategy</h2>
+    <h3>SO100 training chunk construction</h3>
+    <p>SO100 embodiment defines <code>ACTION_HORIZON_REAL = 30</code> and <code>ACTION_CHUNK_LENGTH = 100</code>. Source: <a href="egomimic/rldb/embodiment/so100.py">egomimic/rldb/embodiment/so100.py</a>.</p>
+    <pre><code>raw future command window: 30
+training target chunk:    100 tokens</code></pre>
+    <p>The transform splits raw command pose/gripper, converts rotvec pose to yaw/pitch/roll, and interpolates both pose and gripper to <code>chunk_length=100</code>. Source: <a href="egomimic/rldb/zarr/action_chunk_transforms.py">action_chunk_transforms.py</a>.</p>
+    <pre><code>InterpolatePose(new_chunk_length=100, mode="xyzypr")
+InterpolateLinear(new_chunk_length=100, action_gripper)</code></pre>
+    <p>Therefore, 100 model output tokens should not be interpreted as 100 native 30Hz control steps. They are an interpolated representation of a shorter raw command horizon.</p>
+
+    <h3>EgoVerse official rollout behavior</h3>
+    <p>The official/main rollout path uses:</p>
+    <pre><code>DEFAULT_FREQUENCY = 30 Hz
+QUERY_FREQUENCY = 30
+DEFAULT_RESAMPLE_LENGTH = 45</code></pre>
+    <p>It predicts a chunk, resamples it to 45 actions, executes action indices <code>0..29</code>, then queries again. Source: <a href="egomimic/robot/rollout.py">egomimic/robot/rollout.py</a>.</p>
+
+    <h3>Old SO100 rollout behavior</h3>
+    <p>Before the change, SO100 rollout selected raw chunk indices by:</p>
+    <pre><code>action_indices = action_start_index + arange(query_frequency) * action_stride</code></pre>
+    <p>With the common FM command:</p>
+    <pre><code>--query-frequency 99
+--action-start-index 1
+--action-stride 3</code></pre>
+    <p>the actual executed indices were <code>1,4,7,...,97</code>, i.e. 33 actions. This approximated a time-scale compression, but it was a hard subsampling strategy rather than the official interpolation/downsample.</p>
+
+    <h3>New SO100 rollout behavior</h3>
+    <p>SO100 rollout now defaults to official-style resampling. Source: <a href="egomimic/robot/so100_hpt_receding_rollout.py">so100_hpt_receding_rollout.py</a>.</p>
+    <pre><code>DEFAULT_QUERY_FREQUENCY = 30
+DEFAULT_RESAMPLED_ACTION_LEN = 45
+
+pred chunk 100
+  -&gt; interpolate to 45
+  -&gt; execute first 30
+  -&gt; re-query</code></pre>
+    <p>The interpolation is not “take every Nth token”. It maps old/new time grids:</p>
+    <pre><code>old_time = linspace(0, 1, 100)
+new_time = linspace(0, 1, 45)</code></pre>
+    <p>For <code>[x,y,z,yaw,pitch,roll,gripper]</code>, xyz and gripper are linear-interpolated. Euler angles are unwrapped before interpolation and wrapped back after interpolation.</p>
+
+    <h3>First hardware result with official-style SO100 rollout</h3>
+    <p>Run: <code>2026-05-24_14-13-01</code>, FM gripper5x 60k, <code>frequency=30</code>, <code>query_frequency=30</code>, <code>resampled_action_len=45</code>, <code>action_start_index=0</code>, video recording enabled. User observation: no successful apricot pick during the 90s rollout.</p>
+    <table>
+      <thead>
+        <tr>
+          <th>Logged check</th>
+          <th class="num">Value</th>
+          <th>Read</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>Executed steps / queries</td>
+          <td class="num">2700 / 90</td>
+          <td>90s at 30Hz; one policy query per second.</td>
+        </tr>
+        <tr>
+          <td>Policy inference latency</td>
+          <td class="num">35.1ms mean, 39.5ms p95</td>
+          <td>Fast enough for this receding-horizon schedule.</td>
+        </tr>
+        <tr>
+          <td>Gripper raw/safe/sent</td>
+          <td class="num">identical; clip delta 0</td>
+          <td>No gripper clipping or range limiting in this run.</td>
+        </tr>
+        <tr>
+          <td>Sent gripper command</td>
+          <td class="num">32.34 mean, 37.64 p95, 39.09 max</td>
+          <td>Gripper spent most of the run in a closed-ish range; failure is not an obvious “never close” issue.</td>
+        </tr>
+        <tr>
+          <td>Observed current gripper &gt; 30</td>
+          <td class="num">79.4% of steps</td>
+          <td>Hardware gripper followed close commands often enough that pure command dropout is unlikely.</td>
+        </tr>
+        <tr>
+          <td>IK position error</td>
+          <td class="num">0.46mm mean, 0.87mm p95, 7.13mm max</td>
+          <td>IK itself was not the bottleneck in this run.</td>
+        </tr>
+        <tr>
+          <td>Query-boundary xyz jump after IK/safety</td>
+          <td class="num">7.93mm mean, 14.14mm p95</td>
+          <td>Comparable to the validation-set temporal consistency scale; not enough by itself to explain every failure.</td>
+        </tr>
+        <tr>
+          <td>Query-boundary rotation jump after IK/safety</td>
+          <td class="num">1.13rad mean, 3.31rad p95</td>
+          <td>Rotation discontinuity/tail behavior remains more suspicious than mm-level xyz discontinuity.</td>
+        </tr>
+      </tbody>
+    </table>
+    <p><strong>Timing caveat:</strong> for SO100, the 100 model tokens come from 30 raw future actions. Resampling <code>100 -&gt; 45</code> and executing only indices <code>0..29</code> reaches about <code>29/44 = 66%</code> of the predicted chunk horizon per one-second control interval. The legacy <code>stride=3</code> command used raw indices <code>1,4,...,97</code>, which covered almost the full predicted horizon over about 33 control steps. This can explain why official-style resampling is smoother in validation metrics but may be slower or less decisive in hardware.</p>
+    <p><strong>Logging note:</strong> older logs contain <code>target_delta_xyz_m</code> in camera-ypr coordinate space and <code>clipped_target_delta_xyz_m</code> in base-frame clipped space, so those two fields should not be directly subtracted to infer safety clipping. The SO100 rollout script was updated to add <code>raw_target_base_xyz</code>, <code>raw_target_base_delta_xyz_m</code>, <code>clipped_target_base_xyz</code>, <code>clipped_target_base_delta_xyz_m</code>, <code>target_pose_clip_delta_xyz_m</code>, and <code>target_pose_position_clipped</code> for future runs.</p>
+
+    <h3>Second hardware result: SO100-specific <code>100 -&gt; 30</code> resample</h3>
+    <p>Run: <code>2026-05-24_14-29-57</code>, same FM gripper5x 60k checkpoint, <code>frequency=30</code>, <code>query_frequency=30</code>, <code>resampled_action_len=30</code>, <code>action_start_index=0</code>, video recording enabled. User observation: one apricot was picked or partially lifted, then dropped.</p>
+    <table>
+      <thead>
+        <tr>
+          <th>Time</th>
+          <th class="num">sent / current gripper</th>
+          <th>Video / log read</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>68.0s</td>
+          <td class="num">34.35 / 33.68</td>
+          <td>Gripper is in closed range while contacting/lifting the apricot.</td>
+        </tr>
+        <tr>
+          <td>68.8s</td>
+          <td class="num">32.32 / 33.54</td>
+          <td>Apricot begins to slip/drop while the gripper is still commanded and observed closed.</td>
+        </tr>
+        <tr>
+          <td>69.0s</td>
+          <td class="num">27.95 / 31.01</td>
+          <td>New query starts opening; the object is already unstable or leaving the grasp.</td>
+        </tr>
+        <tr>
+          <td>69.2s</td>
+          <td class="num">18.32 / 24.05</td>
+          <td>Model continues opening quickly; recovery/hold is no longer possible.</td>
+        </tr>
+        <tr>
+          <td>69.4s</td>
+          <td class="num">11.30 / 13.99</td>
+          <td>Gripper is effectively open after the drop.</td>
+        </tr>
+      </tbody>
+    </table>
+    <p><strong>Interpretation:</strong> this is not a clean “held tightly, then model opens early” case. The first visible failure starts while <code>sent/current</code> are still closed, so the primary cause looks like a marginal grasp/contact geometry or not enough physical closing force/position. However, the model does issue a rapid open command immediately after the slip starts, so early release still contributes by preventing recovery and making the failed grasp irreversible.</p>
+
+    <h3>Next rollout-side test: <code>blend5_pose_only</code></h3>
+    <p>The offline smoothing probe showed <code>blend5_pose_only</code> as the only rollout-side smoothing candidate worth testing on hardware. It blends the first 5 pose actions of the new chunk with the unexecuted tail of the previous chunk, while leaving gripper values untouched.</p>
+    <pre><code>new_chunk[0:5, pose] =
+  alpha * new_chunk[0:5, pose] + (1 - alpha) * previous_chunk[30:35, pose]
+alpha = [1/5, 2/5, 3/5, 4/5, 5/5]</code></pre>
+    <p>This requires a resampled chunk longer than the executed interval. Therefore <code>blend5</code> should use <code>resampled_action_len=45</code>, <code>query_frequency=30</code>, not <code>resampled_action_len=30</code>. With <code>30/30</code>, there is no previous tail to blend.</p>
+    <p>The SO100 rollout script now supports this via <code>--rollout-blend-steps 5 --rollout-blend-dims pose</code>. Logs include <code>rollout_blend_info</code>, <code>rollout_blend_applied</code>, <code>rollout_blend_steps_applied</code>, and pre/post boundary gap diagnostics.</p>
+
+    <h3>Hardware result with <code>blend5_pose_only</code></h3>
+    <p>Run: <code>2026-05-24_14-49-43</code>, same FM gripper5x 60k checkpoint, <code>resampled_action_len=45</code>, <code>query_frequency=30</code>, <code>rollout_blend_steps=5</code>, <code>rollout_blend_dims=pose</code>. User observation: still no successful pick/place.</p>
+    <table>
+      <thead>
+        <tr>
+          <th>Metric</th>
+          <th class="num">No-blend resample45</th>
+          <th class="num">blend5 pose-only</th>
+          <th>Read</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>Blend applied</td>
+          <td class="num">0 / 90 queries</td>
+          <td class="num">89 / 90 queries</td>
+          <td>The first query has no previous tail, so 89/90 is expected.</td>
+        </tr>
+        <tr>
+          <td>Logged first-step pos gap before / after blend</td>
+          <td class="num">n/a</td>
+          <td class="num">7.06 / 1.41mm mean, 12.3 / 2.46mm p95</td>
+          <td>Blend strongly reduces the planned boundary discontinuity.</td>
+        </tr>
+        <tr>
+          <td>Logged first-step rot gap before / after blend</td>
+          <td class="num">n/a</td>
+          <td class="num">0.051 / 0.010rad mean, 0.087 / 0.017rad p95</td>
+          <td>Rotation boundary is also substantially smoother.</td>
+        </tr>
+        <tr>
+          <td>Actual query-boundary xyz jump after IK/safety</td>
+          <td class="num">7.93mm mean, 14.1mm p95</td>
+          <td class="num">1.45mm mean, 2.35mm p95</td>
+          <td>Temporal discontinuity at the hardware command boundary is largely removed.</td>
+        </tr>
+        <tr>
+          <td>Actual query-boundary rot jump after IK/safety</td>
+          <td class="num">0.041rad mean, 0.073rad p95</td>
+          <td class="num">0.0108rad mean, 0.0195rad p95</td>
+          <td>Pose smoothing worked in the real rollout log.</td>
+        </tr>
+        <tr>
+          <td>Gripper changed by blend</td>
+          <td class="num">n/a</td>
+          <td class="num">0 max delta</td>
+          <td>As intended, pose-only blend did not alter gripper predictions.</td>
+        </tr>
+        <tr>
+          <td>Open bursts after closed median &gt; 28</td>
+          <td class="num">1</td>
+          <td class="num">3</td>
+          <td>Gripper still has rapid open episodes even when pose discontinuity is fixed.</td>
+        </tr>
+      </tbody>
+    </table>
+    <p><strong>Interpretation:</strong> <code>blend5_pose_only</code> did what it was designed to do: it reduced command-boundary pose/rotation jumps by roughly 5x, and it did not touch gripper. Because pick/place still failed, temporal inconsistency should no longer be treated as the primary bottleneck. The remaining evidence points to the grasp itself: marginal contact geometry, insufficient physical close/holding behavior, and rapid model-predicted open commands that prevent recovery after a slip.</p>
+    <p><strong>Why the next suggestions focus on gripper:</strong> the logs do not prove that gripper is the only problem. They do show that pose boundary discontinuity can be largely removed without restoring success, while gripper commands still contain open bursts after a closed state. The previous resample30 run also showed a visible slip while the gripper was still closed, followed immediately by a model open command. So the next debugging target is better stated as <em>grasp stability plus gripper hold/release behavior</em>, not gripper alone.</p>
+
+    <h3>Approach-stage follow-up from rollout log/video</h3>
+    <p>After checking the <code>2026-05-24_14-49-43</code> blend5 log against the recorded video, the approach stage itself looks suspect. This is not a temporal-boundary artifact: after the first few startup commands, IK error is small and no persistent pose clipping is present. The more visible issue is that the policy starts closing while still approaching from the right/upper-right side, then later opens again without having established a reliable lift.</p>
+    <table>
+      <thead>
+        <tr>
+          <th>Run</th>
+          <th class="num">First sent/current gripper &ge; 30</th>
+          <th class="num">First sent/current reopen &lt; 30</th>
+          <th>Video/log read</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><code>14-13-01</code>, resample45</td>
+          <td class="num">1.65s / 1.81s</td>
+          <td class="num">6.79s / 6.92s</td>
+          <td>Closes early in the first approach and reopens about 5.1s after current gripper first reaches closed.</td>
+        </tr>
+        <tr>
+          <td><code>14-29-57</code>, resample30</td>
+          <td class="num">1.25s / 1.38s</td>
+          <td class="num">6.27s / 6.37s</td>
+          <td>Same fixed-duration close-then-open pattern; video showed a marginal/slipping grasp before the model opened.</td>
+        </tr>
+        <tr>
+          <td><code>14-49-43</code>, blend5 pose-only</td>
+          <td class="num">1.88s / 2.01s</td>
+          <td class="num">7.88s / 7.98s</td>
+          <td>At about 1.9-2.1s the gripper is already near the closed threshold while the wrist is still approaching the upper-right apricot. At 6.6-7.8s it is closed near the apricot, but there is no clear lift; by 8.2-9.0s it opens again.</td>
+        </tr>
+      </tbody>
+    </table>
+    <p><strong>Low-level execution check:</strong> in the blend5 approach window before sent gripper first reaches 30, only 9/56 steps had position clipping, all at startup or the first re-query (<code>steps 0-5</code> and <code>32-34</code>). The largest IK-to-safe joint change was at startup (<code>25.3deg</code> at step 0), but it was gone by step 8 (<code>t=0.27s</code>). From roughly <code>0.8s</code> through the failed contact, <code>target_pose_position_clipped=false</code> and IK error is sub-mm to about 1mm. So the approach failure is unlikely to be explained primarily by rollout clipping or IK tracking.</p>
+    <p><strong>Current interpretation:</strong> FM gripper5x did reduce the original immediate-release failure, but the real rollout still contains a different timing problem: the policy appears to use a fairly script-like close/hold/open schedule. If the side approach has not actually captured the apricot by the time the learned schedule reaches its open phase, the gripper opens and the policy loses the chance to recover. This is better described as <em>approach/contact geometry plus no grasp-confirmation gate</em>, not just closed-hold early release.</p>
+
+    <h3>Offline grasp-timing probe</h3>
+    <p>Follow-up source: <a href="egomimic/scripts/diagnostics/probe_so100_val_grasp_timing.py">probe_so100_val_grasp_timing.py</a>. Output: <a href="logs/so100_hpt/val_grasp_timing_probe/so100_mlp_vs_fm_grasp_timing_2026-05-24_phase_summary.csv">so100_mlp_vs_fm_grasp_timing_2026-05-24_phase_summary.csv</a>. The probe uses the same 154 <code>open_hold_approach</code> and 154 <code>closing_grasp</code> validation states for every model, and compares predicted gripper close/reopen timing against the full dataset GT chunk under <code>resample45 -&gt; execute30</code>.</p>
+    <table>
+      <thead>
+        <tr>
+          <th>Model</th>
+          <th class="num">Open-hold false close</th>
+          <th class="num">Closing pred / GT close rate</th>
+          <th class="num">Close idx offset median</th>
+          <th class="num">Pred max / GT max gripper</th>
+          <th>Read</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>MLP 80k</td>
+          <td class="num">0%</td>
+          <td class="num">66.9% / 71.4%</td>
+          <td class="num">+2 steps</td>
+          <td class="num">31.44 / 33.44</td>
+          <td>MLP is also slightly late relative to GT within the executed horizon.</td>
+        </tr>
+        <tr>
+          <td>FM baseline 60k</td>
+          <td class="num">0%</td>
+          <td class="num">66.9% / 71.4%</td>
+          <td class="num">+3 steps</td>
+          <td class="num">31.00 / 33.44</td>
+          <td>No evidence of generic early close; if anything it is slightly later/weaker.</td>
+        </tr>
+        <tr>
+          <td>FM gripper5x 60k</td>
+          <td class="num">0%</td>
+          <td class="num">66.5% / 71.4%</td>
+          <td class="num">+2 steps</td>
+          <td class="num">31.16 / 33.44</td>
+          <td>Gripper5x does not introduce an early-close signature on validation states.</td>
+        </tr>
+        <tr>
+          <td>FM gripper5x 80k</td>
+          <td class="num">0%</td>
+          <td class="num">66.9% / 71.4%</td>
+          <td class="num">+3 steps</td>
+          <td class="num">31.19 / 33.44</td>
+          <td>Very similar timing to the 60k FM model.</td>
+        </tr>
+      </tbody>
+    </table>
+    <p><strong>Interpretation update:</strong> the validation timing probe does <em>not</em> support a broad claim that FM closes earlier than MLP or GT during normal <code>open_hold_approach</code>/<code>closing_grasp</code> states. The hardware blend5 failure is therefore more likely tied to rollout-state distribution, target/contact geometry, target selection, or lack of grasp confirmation after a marginal side approach, rather than a simple global close-timing bias visible on these validation phases.</p>
+
+    <h3>Imminent closing-grasp probe</h3>
+    <p>To match the observed rollout symptom more closely, the same probe now emits <code>diagnostic_phase=closing_grasp_imminent</code>: samples where the original phase is <code>closing_grasp</code> and GT gripper reaches the close threshold inside the actual <code>resample45 -&gt; execute30</code> window. This is still a GT-action proxy, not a video/object detector, but it directly asks whether the model fails to close or fails to move in the GT approach direction when GT would close now.</p>
+    <p>Output: <a href="logs/so100_hpt/val_grasp_timing_probe/so100_mlp_vs_fm_grasp_timing_2026-05-24_diagnostic_phase_summary.csv">so100_mlp_vs_fm_grasp_timing_2026-05-24_diagnostic_phase_summary.csv</a>.</p>
+    <table>
+      <thead>
+        <tr>
+          <th>Model</th>
+          <th class="num">Missed close</th>
+          <th class="num">Late close &ge;3 steps</th>
+          <th class="num">Low motion</th>
+          <th class="num">Wrong direction</th>
+          <th class="num">Motion ratio / cosine</th>
+          <th>Read</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>MLP 80k</td>
+          <td class="num">13.6%</td>
+          <td class="num">38.2%</td>
+          <td class="num">0.9%</td>
+          <td class="num">3.6%</td>
+          <td class="num">1.24 / 0.877</td>
+          <td>Baseline missed-close and motion alignment level.</td>
+        </tr>
+        <tr>
+          <td>FM baseline 60k</td>
+          <td class="num">13.3%</td>
+          <td class="num">45.8%</td>
+          <td class="num">3.3%</td>
+          <td class="num">7.0%</td>
+          <td class="num">1.15 / 0.813</td>
+          <td>Slightly more late/wrong-direction tendency than MLP.</td>
+        </tr>
+        <tr>
+          <td>FM gripper5x 60k</td>
+          <td class="num">13.3%</td>
+          <td class="num">41.2%</td>
+          <td class="num">0.6%</td>
+          <td class="num">2.1%</td>
+          <td class="num">1.30 / 0.860</td>
+          <td>Does not show a higher missed-close or hold-still signature than MLP.</td>
+        </tr>
+        <tr>
+          <td>FM gripper5x 80k</td>
+          <td class="num">13.0%</td>
+          <td class="num">43.9%</td>
+          <td class="num">2.4%</td>
+          <td class="num">2.1%</td>
+          <td class="num">1.32 / 0.878</td>
+          <td>Close/motion metrics remain close to MLP.</td>
+        </tr>
+      </tbody>
+    </table>
+    <p><strong>Imminent-grasp read:</strong> this validation subset does not reproduce the hardware symptom as a broad FM-vs-MLP gap. In missed-close rows, the predicted pose motion is usually still aligned with GT: for example the missed-close cosine mean is about 0.95-0.96 for the FM models and 0.95 for MLP. The real failure may therefore require rollout-specific visual states: ambiguous target selection, apricot clusters, side-contact geometry, or states after prior failed contacts that are not well represented by the normal validation <code>closing_grasp</code> slices.</p>
+
+    <h3>Recommended rollout command shape</h3>
+    <pre><code>python egomimic/robot/so100_hpt_receding_rollout.py \
+  --frequency 30 \
+  --query-frequency 30 \
+  --resampled-action-len 45 \
+  --action-start-index 0 \
+  ...</code></pre>
+    <p>Legacy stride mode still exists for controlled comparisons:</p>
+    <pre><code>--resampled-action-len 0 --action-stride 3</code></pre>
+  </section>
+
+  <section id="artifacts">
+    <h2>Artifacts And References</h2>
+    <h3>Local code</h3>
+    <ul>
+      <li>SO100 embodiment chunk settings: <a href="egomimic/rldb/embodiment/so100.py">egomimic/rldb/embodiment/so100.py</a></li>
+      <li>SO100 action interpolation transforms: <a href="egomimic/rldb/zarr/action_chunk_transforms.py">egomimic/rldb/zarr/action_chunk_transforms.py</a></li>
+      <li>Official/main EgoVerse rollout: <a href="egomimic/robot/rollout.py">egomimic/robot/rollout.py</a></li>
+      <li>SO100 rollout changed to official-style resample: <a href="egomimic/robot/so100_hpt_receding_rollout.py">egomimic/robot/so100_hpt_receding_rollout.py</a></li>
+      <li>FM loss weighting implementation: <a href="egomimic/models/denoising_policy.py">egomimic/models/denoising_policy.py</a></li>
+      <li>5x gripper training config: <a href="egomimic/hydra_configs/train_zarr_so100_singlearm_fm_gripper5x_steps60k.yaml">train_zarr_so100_singlearm_fm_gripper5x_steps60k.yaml</a></li>
+      <li>Gripper release probe: <a href="egomimic/scripts/diagnostics/probe_so100_val_gripper_release.py">probe_so100_val_gripper_release.py</a></li>
+      <li>Action quality / temporal consistency probe: <a href="egomimic/scripts/diagnostics/probe_so100_val_action_quality.py">probe_so100_val_action_quality.py</a></li>
+      <li>Rollout smoothing strategy probe: <a href="egomimic/scripts/diagnostics/probe_so100_rollout_smoothing.py">probe_so100_rollout_smoothing.py</a></li>
+      <li>Grasp close/reopen timing probe: <a href="egomimic/scripts/diagnostics/probe_so100_val_grasp_timing.py">probe_so100_val_grasp_timing.py</a></li>
+    </ul>
+
+    <h3>Local outputs</h3>
+    <ul>
+      <li>Gripper sequence comparison: <a href="logs/so100_hpt/val_gripper_probe/sequence_metrics_comparison_2026-05-24.csv">logs/so100_hpt/val_gripper_probe/sequence_metrics_comparison_2026-05-24.csv</a></li>
+      <li>Temporal consistency, original horizons: <a href="logs/so100_hpt/val_action_quality_probe/so100_mlp_vs_fm_action_quality_2026-05-24_summary.json">so100_mlp_vs_fm_action_quality_2026-05-24_summary.json</a></li>
+      <li>Temporal consistency, official resample horizon: <a href="logs/so100_hpt/val_action_quality_probe/so100_mlp_vs_fm_action_quality_resample45_2026-05-24_summary.json">so100_mlp_vs_fm_action_quality_resample45_2026-05-24_summary.json</a></li>
+      <li>Rollout smoothing offline probe: <a href="logs/so100_hpt/val_rollout_smoothing_probe/so100_mlp_vs_fm_rollout_smoothing_poseonly_2026-05-24_summary.json">so100_mlp_vs_fm_rollout_smoothing_poseonly_2026-05-24_summary.json</a></li>
+      <li>Grasp close/reopen timing probe: <a href="logs/so100_hpt/val_grasp_timing_probe/so100_mlp_vs_fm_grasp_timing_2026-05-24_summary.json">so100_mlp_vs_fm_grasp_timing_2026-05-24_summary.json</a></li>
+      <li>Grasp timing phase summary CSV: <a href="logs/so100_hpt/val_grasp_timing_probe/so100_mlp_vs_fm_grasp_timing_2026-05-24_phase_summary.csv">so100_mlp_vs_fm_grasp_timing_2026-05-24_phase_summary.csv</a></li>
+      <li>Grasp timing diagnostic phase summary CSV: <a href="logs/so100_hpt/val_grasp_timing_probe/so100_mlp_vs_fm_grasp_timing_2026-05-24_diagnostic_phase_summary.csv">so100_mlp_vs_fm_grasp_timing_2026-05-24_diagnostic_phase_summary.csv</a></li>
+      <li>Official-style FM gripper5x hardware rollout log: <a href="logs/so100_hpt/rollout_logs/so100_hpt_rollout_2026-05-24_14-13-01.jsonl">so100_hpt_rollout_2026-05-24_14-13-01.jsonl</a></li>
+      <li>Official-style FM gripper5x hardware rollout video: <a href="logs/so100_hpt/rollout_videos/so100_hpt_rollout_2026-05-24_14-13-01.mp4">so100_hpt_rollout_2026-05-24_14-13-01.mp4</a></li>
+      <li>SO100-specific resample30 FM gripper5x hardware rollout log: <a href="logs/so100_hpt/rollout_logs/so100_hpt_rollout_2026-05-24_14-29-57.jsonl">so100_hpt_rollout_2026-05-24_14-29-57.jsonl</a></li>
+      <li>SO100-specific resample30 FM gripper5x hardware rollout video: <a href="logs/so100_hpt/rollout_videos/so100_hpt_rollout_2026-05-24_14-29-57.mp4">so100_hpt_rollout_2026-05-24_14-29-57.mp4</a></li>
+      <li>blend5 pose-only FM gripper5x hardware rollout log: <a href="logs/so100_hpt/rollout_logs/so100_hpt_rollout_2026-05-24_14-49-43.jsonl">so100_hpt_rollout_2026-05-24_14-49-43.jsonl</a></li>
+      <li>blend5 pose-only FM gripper5x hardware rollout video: <a href="logs/so100_hpt/rollout_videos/so100_hpt_rollout_2026-05-24_14-49-43.mp4">so100_hpt_rollout_2026-05-24_14-49-43.mp4</a></li>
+      <li>FM gripper5x 60k checkpoint: <code>logs/so100_hpt/hpt_fm_so100_only_gripper5x_steps60k_2026-05-23_14-28-53/checkpoints/step_60000.ckpt</code></li>
+      <li>FM gripper5x 80k checkpoint: <code>logs/so100_hpt/hpt_fm_so100_only_gripper5x_resume80k_from60k_2026-05-23_21-00-17/checkpoints/step_80000.ckpt</code></li>
+      <li>MLP 80k checkpoint: <code>logs/so100_hpt/hpt_base_steps100k_2026-04-30_19-42-21/checkpoints/step_80000.ckpt</code></li>
+      <li>FM baseline 60k checkpoint: <code>logs/so100_hpt/hpt_fm_paper_steps150k_2026-05-18_21-22-20/checkpoints/step_60000.ckpt</code></li>
+    </ul>
+
+    <h3>External references</h3>
+    <ul>
+      <li><a href="https://huggingface.co/docs/lerobot/action_representations">LeRobot Action Representations</a>: absolute actions are default; gripper is typically binary open/close and excluded from relative encoding.</li>
+      <li><a href="https://arxiv.org/abs/2303.04137">Diffusion Policy: Visuomotor Policy Learning via Action Diffusion</a>: action diffusion with receding-horizon control.</li>
+      <li><a href="https://arxiv.org/abs/2505.21851">Streaming Flow Policy</a>: diffusion/flow policies can be expensive because they sample full action trajectories before execution; proposes streaming/tighter loops.</li>
+      <li><a href="https://arxiv.org/abs/2412.00084">Unpacking the Individual Components of Diffusion Policy</a>: identifies action sequence execution and receding horizon among key components.</li>
+    </ul>
+
+    <h3>Open questions for follow-up</h3>
+    <ul>
+      <li>Whether FM pose consistency improves with a consistency regularizer, overlapping-chunk loss, or deterministic/low-variance sampling at inference.</li>
+      <li>Whether FM should use the same temporal ensembling/aggregation idea commonly used for action-chunk policies, instead of hard replacing the queue at every query.</li>
+      <li>Whether 5x gripper should remain the default for SO100 FM, or whether a smaller weight is enough once official resample rollout is used.</li>
+      <li>Whether co-train should be tested only after FM SO100-only reaches an acceptable MLP-comparable success baseline.</li>
+    </ul>
+  </section>
+</main>
+</body>
+</html>

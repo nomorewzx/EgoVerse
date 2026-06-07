@@ -11,10 +11,11 @@ from egomimic.rldb.zarr.utils import DataSchematic
 
 
 class DummyAlgo:
-    def __init__(self, data_schematic, value, echo_value=None):
+    def __init__(self, data_schematic, value, echo_value=None, viz_func=None):
         self.data_schematic = data_schematic
         self.value = value
         self.echo_value = echo_value
+        self.viz_func = viz_func
         self.nets = nn.ModuleDict({"policy": nn.Linear(1, 1)})
 
 
@@ -32,7 +33,6 @@ def _build_schematic_state():
                 },
             }
         },
-        {"eva_bimanual": "observations.images.front_img_1"},
         norm_mode="quantile",
     )
     schematic.infer_shapes_from_batch(
@@ -106,7 +106,27 @@ def test_model_wrapper_config_tree_builds_optimizer_and_scheduler():
     optimizers = wrapper.configure_optimizers()
 
     assert isinstance(optimizers["optimizer"], torch.optim.SGD)
-    assert isinstance(optimizers["lr_scheduler"], torch.optim.lr_scheduler.StepLR)
+    assert isinstance(
+        optimizers["lr_scheduler"]["scheduler"],
+        torch.optim.lr_scheduler.StepLR,
+    )
+
+
+def test_model_wrapper_trainable_patterns_filter_optimizer_params():
+    wrapper = ModelWrapper(
+        config_tree=_build_config_tree(),
+        data_schematic_state=_build_schematic_state(),
+        trainable_parameter_patterns=["nets.policy.bias"],
+    )
+    wrapper._trainer = SimpleNamespace(model=wrapper)
+
+    assert not wrapper.nets["policy"].weight.requires_grad
+    assert wrapper.nets["policy"].bias.requires_grad
+
+    optimizers = wrapper.configure_optimizers()
+    params = optimizers["optimizer"].param_groups[0]["params"]
+
+    assert params == [wrapper.nets["policy"].bias]
 
 
 def test_model_wrapper_load_from_checkpoint_reconstructs_from_hparams(tmp_path: Path):

@@ -20,15 +20,19 @@ class So100SingleArm(Embodiment):
     @classmethod
     def get_transform_list(
         cls,
-        mode: Literal["camera_frame_ypr"] = "camera_frame_ypr",
+        mode: Literal["camera_frame_ypr", "camera_frame_ypr_force"] = "camera_frame_ypr",
         chunk_length: int | None = None,
         stride: int | None = None,
     ) -> list[Transform]:
-        if mode != "camera_frame_ypr":
+        if mode not in {"camera_frame_ypr", "camera_frame_ypr_force"}:
             raise ValueError(
-                f"Unsupported SO100 transform mode '{mode}'. Expected 'camera_frame_ypr'."
+                f"Unsupported SO100 transform mode '{mode}'. "
+                "Expected 'camera_frame_ypr' or 'camera_frame_ypr_force'."
             )
         return build_so100_singlearm_transform_list(
+            force_proxy_key="observations.state.force_proxy"
+            if mode == "camera_frame_ypr_force"
+            else None,
             chunk_length=chunk_length or cls.ACTION_CHUNK_LENGTH,
             stride=stride or cls.ACTION_STRIDE,
         )
@@ -36,13 +40,14 @@ class So100SingleArm(Embodiment):
     @classmethod
     def _get_keymap(
         cls,
-        keymap_mode: Literal["camera_frame_ypr"] = "camera_frame_ypr",
+        keymap_mode: Literal["camera_frame_ypr", "camera_frame_ypr_force"] = "camera_frame_ypr",
     ):
-        if keymap_mode != "camera_frame_ypr":
+        if keymap_mode not in {"camera_frame_ypr", "camera_frame_ypr_force"}:
             raise ValueError(
-                f"Unsupported SO100 keymap mode '{keymap_mode}'. Expected 'camera_frame_ypr'."
+                f"Unsupported SO100 keymap mode '{keymap_mode}'. "
+                "Expected 'camera_frame_ypr' or 'camera_frame_ypr_force'."
             )
-        return {
+        keymap = {
             cls.VIZ_IMAGE_KEY: {
                 "key_type": "camera_keys",
                 "zarr_key": "images.front_1",
@@ -57,3 +62,9 @@ class So100SingleArm(Embodiment):
                 "horizon": cls.ACTION_HORIZON_REAL,
             },
         }
+        if keymap_mode == "camera_frame_ypr_force":
+            keymap["observations.state.force_proxy"] = {
+                "key_type": "proprio_keys",
+                "zarr_key": "observations.state.force_proxy",
+            }
+        return keymap

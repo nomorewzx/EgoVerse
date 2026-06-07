@@ -1,0 +1,815 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>SO100 Near-Apricot Counterfactual Report</title>
+  <style>
+:root { --bg:#f7f8fa; --panel:#fff; --ink:#17202a; --muted:#596575; --line:#d8dee8; --accent:#2f6f73; --warn:#9a5b00; --bad:#a43b35; }
+body { margin:0; background:var(--bg); color:var(--ink); font:14px/1.55 system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; }
+main { max-width:1180px; margin:0 auto; padding:28px 24px 56px; }
+header { border-bottom:1px solid var(--line); margin-bottom:22px; padding-bottom:16px; }
+h1 { margin:0 0 8px; font-size:28px; line-height:1.2; letter-spacing:0; }
+h2 { margin:28px 0 10px; font-size:20px; letter-spacing:0; }
+h3 { margin:20px 0 8px; font-size:16px; letter-spacing:0; }
+p { margin:8px 0; }
+.note { color:var(--muted); }
+.grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(260px,1fr)); gap:12px; margin:14px 0 20px; }
+.callout { background:var(--panel); border:1px solid var(--line); border-left:4px solid var(--accent); padding:12px 14px; }
+.callout.warn { border-left-color:var(--warn); }
+img { max-width:100%; height:auto; border:1px solid var(--line); background:#fff; }
+table.data { border-collapse:collapse; width:100%; background:#fff; margin:8px 0 18px; font-size:13px; }
+table.data th, table.data td { border:1px solid var(--line); padding:6px 8px; text-align:right; vertical-align:top; }
+table.data th:first-child, table.data td:first-child, table.data th:nth-child(2), table.data td:nth-child(2) { text-align:left; }
+table.data th { background:#eef2f5; font-weight:650; }
+code { background:#eef2f5; padding:1px 4px; border-radius:4px; }
+.paths { font-size:12px; color:var(--muted); }
+</style>
+</head>
+<body>
+<main>
+<header>
+  <h1>SO100 Near-Apricot Counterfactual Report</h1>
+  <p class="note">165 query frames: prev rollout 77, curr rollout 88. Candidate threshold: gripper-apricot distance <= 70 px. FM seeds 0/1/2 are averaged per frame before ranking; MLP is deterministic.</p>
+</header>
+
+<section>
+  <h2>Key Takeaways</h2>
+  <div class="grid">
+    <div class="callout"><b>Primary approach ranking.</b><br/>按 30-step 内最接近 apricot 的 best progress 和 per-frame mean rank，FM SO100-only 60k/80k 排在前两位，均值约 6.9 px。</div>
+    <div class="callout"><b>MLP behavior.</b><br/>MLP 在单帧 winner count 上很多，但 overall final progress 为 -0.91 px，说明它常有短暂靠近，最后 30-step 末端又退远。</div>
+    <div class="callout warn"><b>Cotrain / 5xGrip.</b><br/>Cotrain close rate 最高，但靠近量没有超过 SO100-only；5xGrip 也没有带来更强的 apricot approach。后续 per-horizon 分析显示 Cotrain 的 early direction 可以更好，但 target-axis progress 不持续。</div>
+  </div>
+</section>
+
+<section>
+  <h2>Follow-up Findings</h2>
+  <div class="grid">
+    <div class="callout"><b>Cotrain is not uniformly worse.</b><br/>在 <code>approach_50_70</code>，Cotrain 的前 10 步方向/进展有局部优势，尤其相对 SO100 60k。</div>
+    <div class="callout warn"><b>Final execution is still weaker.</b><br/>到 horizon step 30，Cotrain 在 close、near、approach 三个距离段对 SO100-only 的 final progress delta 都是负的。</div>
+    <div class="callout"><b>Representation hypothesis.</b><br/>Human right-arm action 是 future observed hand pose；SO100 action 是 fixed-camera robot command pose。Rotation/action 语义差异很可能是 cotrain 负迁移来源。</div>
+  </div>
+</section>
+
+<section>
+  <h2>Cotrain Horizon Deep Dive</h2>
+  <p>我又对 <code>FM Cotrain 80k</code>、<code>FM SO100 60k</code>、<code>FM SO100 80k</code> 重新跑了 165 frames 的 per-horizon counterfactual，保存每个 horizon step 的 progress、target-axis、lateral、direction cosine 和 gripper 值。Deltas below are always Cotrain minus SO100-only.</p>
+  <img src="logs/so100_hpt/rollout_counterfactual_probe/so100_cotrain_vs_so100_near_apricot_deepdive_2026-05-25_horizon_model_progress_curves.png" alt="horizon model progress curves" />
+  <img src="logs/so100_hpt/rollout_counterfactual_probe/so100_cotrain_vs_so100_near_apricot_deepdive_2026-05-25_horizon_delta_decomposition_curves.png" alt="horizon delta decomposition curves" />
+  <table class="dataframe data">
+    <thead>
+      <tr style="text-align: right;">
+        <th>comparison</th>
+        <th>phase</th>
+        <th>step 1 progress delta</th>
+        <th>step 5 progress delta</th>
+        <th>step 10 progress delta</th>
+        <th>step 30 progress delta</th>
+        <th>step 30 target-axis delta</th>
+        <th>step 30 gripper delta</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr><td>Cotrain - SO100 60k</td><td>approach 50-70px</td><td>2.579</td><td>2.890</td><td>2.897</td><td>-1.330</td><td>-1.794</td><td>2.397</td></tr>
+      <tr><td>Cotrain - SO100 60k</td><td>near 30-50px</td><td>-0.075</td><td>-0.273</td><td>-0.659</td><td>-1.849</td><td>-2.057</td><td>4.455</td></tr>
+      <tr><td>Cotrain - SO100 60k</td><td>close 0-30px</td><td>0.308</td><td>-0.158</td><td>-1.152</td><td>-3.822</td><td>-1.876</td><td>3.811</td></tr>
+      <tr><td>Cotrain - SO100 80k</td><td>approach 50-70px</td><td>1.290</td><td>0.796</td><td>0.274</td><td>-2.322</td><td>-2.323</td><td>3.484</td></tr>
+      <tr><td>Cotrain - SO100 80k</td><td>near 30-50px</td><td>0.987</td><td>0.316</td><td>-0.424</td><td>-2.003</td><td>-2.129</td><td>6.582</td></tr>
+      <tr><td>Cotrain - SO100 80k</td><td>close 0-30px</td><td>1.049</td><td>0.341</td><td>-0.786</td><td>-4.325</td><td>-1.660</td><td>4.704</td></tr>
+    </tbody>
+  </table>
+  <p>Interpretation: Cotrain can point toward the apricot early, but by step 30 it usually has lower target-axis progress and a larger gripper value. That fits the pattern “semantic target prior transfers, SO100-specific servoing does not transfer cleanly.”</p>
+</section>
+
+<section>
+  <h2>Relaxed Distance Probe</h2>
+  <p>我把 candidate threshold 从 70px 放宽到 150px，覆盖同两条 rollout 的全部 180 个 query frames。新增远距离样本很少：<code>70-95px</code> 有 8 frames，<code>95-150px</code> 有 7 frames，所以这里是 diagnostic signal，不是强统计结论。</p>
+  <img src="logs/so100_hpt/rollout_counterfactual_probe/so100_cotrain_vs_so100_near_apricot_threshold150_deepdive_2026-05-25_first10_direction_by_distance_band.png" alt="first10 direction by distance band" />
+  <img src="logs/so100_hpt/rollout_counterfactual_probe/so100_cotrain_vs_so100_near_apricot_threshold150_deepdive_2026-05-25_distance_band_delta_curves_50_70_vs_70_150.png" alt="distance band delta curves" />
+  <table class="dataframe data">
+    <thead>
+      <tr style="text-align: right;">
+        <th>comparison</th>
+        <th>distance band</th>
+        <th>n frames</th>
+        <th>first10 direction-cos delta</th>
+        <th>direction win rate</th>
+        <th>step10 progress delta</th>
+        <th>step10 progress win rate</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr><td>Cotrain - SO100 60k</td><td>0-30px</td><td>95</td><td>-0.033</td><td>0.432</td><td>-1.152</td><td>0.316</td></tr>
+      <tr><td>Cotrain - SO100 60k</td><td>30-50px</td><td>47</td><td>0.062</td><td>0.511</td><td>-0.659</td><td>0.468</td></tr>
+      <tr><td>Cotrain - SO100 60k</td><td>50-70px</td><td>23</td><td>0.321</td><td>0.652</td><td>2.897</td><td>0.609</td></tr>
+      <tr><td>Cotrain - SO100 60k</td><td>70-150px</td><td>15</td><td>0.400</td><td>0.733</td><td>3.250</td><td>0.800</td></tr>
+      <tr><td>Cotrain - SO100 80k</td><td>0-30px</td><td>95</td><td>-0.065</td><td>0.400</td><td>-0.786</td><td>0.358</td></tr>
+      <tr><td>Cotrain - SO100 80k</td><td>30-50px</td><td>47</td><td>0.062</td><td>0.532</td><td>-0.424</td><td>0.447</td></tr>
+      <tr><td>Cotrain - SO100 80k</td><td>50-70px</td><td>23</td><td>0.052</td><td>0.522</td><td>0.274</td><td>0.435</td></tr>
+      <tr><td>Cotrain - SO100 80k</td><td>70-150px</td><td>15</td><td>0.176</td><td>0.600</td><td>2.969</td><td>0.800</td></tr>
+    </tbody>
+  </table>
+  <p>Interpretation: 放宽距离后，Cotrain 的 early direction 优势确实更明显，尤其在 <code>70-150px</code>。但样本只有 15 frames，需要更多 rollout 才能判断是否稳定。</p>
+</section>
+
+<section>
+  <h2>Representation Hypothesis And Next Experiment</h2>
+  <p>当前 SO100 和 human 虽然都进入 <code>actions_cartesian</code>，但语义不同。SO100 使用 fixed-camera robot EE command pose；human ego-view 使用 future observed right-hand pose，并转到 current head frame。动作语义差异客观存在，尤其 rotation frame/axis 定义很可能不一致。</p>
+  <p>因此我新增了一个 xyz-only cotrain 训练配置：human no-gripper action layout 是 <code>[x, y, z, yaw, pitch, roll]</code>，只保留 human xyz loss，mask human rotation loss；SO100 action loss 仍然全维度正常训练。</p>
+  <table class="dataframe data">
+    <thead>
+      <tr style="text-align: right;">
+        <th>domain</th>
+        <th>action dims supervised</th>
+        <th>mask / weights</th>
+        <th>config</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr><td>so100_singlearm</td><td>x, y, z, yaw, pitch, roll, gripper</td><td>default full loss</td><td>same SO100 dataset and head</td></tr>
+      <tr><td>ego_view_right_arm</td><td>x, y, z only</td><td><code>[1, 1, 1, 0, 0, 0]</code></td><td><code>train_zarr_so100_apricot_right_arm_cotrain_human_indomain_part1234_xyz_only.yaml</code></td></tr>
+    </tbody>
+  </table>
+  <p>如果这个 experiment 保留远距离 direction advantage，同时改善 close/near final progress，就支持“human 数据有语义帮助，但 rotation/action representation mismatch 伤害 SO100 control”的解释。</p>
+</section>
+
+<section>
+  <h2>Metric Semantics</h2>
+  <p><code>exec_cos_to_target_mean</code> 越高表示 30-step 轨迹方向越朝向 apricot；<code>exec_best_progress_px</code> 越高表示轨迹中曾经离 apricot 更近；<code>exec_final_progress_px</code> 越高表示 30-step 末端仍更近；<code>exec_min_distance_px</code> 越低越好。</p>
+</section>
+
+<section>
+  <h2>Overall Means</h2>
+  <img src="logs/so100_hpt/rollout_counterfactual_probe/so100_two_rollouts_near_apricot_exhaustive_counterfactual_threshold70_2026-05-25_analysis_overall_bars.png" alt="overall metric bars" />
+  <table class="dataframe data">
+  <thead>
+    <tr style="text-align: right;">
+      <th>model</th>
+      <th>frames</th>
+      <th>first10 cos</th>
+      <th>30-step cos</th>
+      <th>best progress px</th>
+      <th>final progress px</th>
+      <th>min distance px</th>
+      <th>close rate</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>FM SO100 60k</td>
+      <td>165</td>
+      <td>0.246</td>
+      <td>0.367</td>
+      <td>6.911</td>
+      <td>3.120</td>
+      <td>23.948</td>
+      <td>0.655</td>
+    </tr>
+    <tr>
+      <td>FM SO100 80k</td>
+      <td>165</td>
+      <td>0.301</td>
+      <td>0.399</td>
+      <td>6.878</td>
+      <td>3.591</td>
+      <td>23.982</td>
+      <td>0.695</td>
+    </tr>
+    <tr>
+      <td>MLP 80k</td>
+      <td>165</td>
+      <td>0.340</td>
+      <td>0.246</td>
+      <td>5.383</td>
+      <td>-0.908</td>
+      <td>25.476</td>
+      <td>0.636</td>
+    </tr>
+    <tr>
+      <td>FM Cotrain 80k</td>
+      <td>165</td>
+      <td>0.289</td>
+      <td>0.281</td>
+      <td>5.170</td>
+      <td>0.207</td>
+      <td>25.690</td>
+      <td>0.899</td>
+    </tr>
+    <tr>
+      <td>FM 5xGrip 60k</td>
+      <td>165</td>
+      <td>0.274</td>
+      <td>0.298</td>
+      <td>4.806</td>
+      <td>2.390</td>
+      <td>26.053</td>
+      <td>0.733</td>
+    </tr>
+    <tr>
+      <td>FM 5xGrip 80k</td>
+      <td>165</td>
+      <td>0.221</td>
+      <td>0.249</td>
+      <td>4.838</td>
+      <td>2.135</td>
+      <td>26.021</td>
+      <td>0.758</td>
+    </tr>
+  </tbody>
+</table>
+</section>
+
+<section>
+  <h2>Per-Frame Ranking</h2>
+  <h3>Primary metric: best progress</h3>
+  <table class="dataframe data">
+  <thead>
+    <tr style="text-align: right;">
+      <th>model</th>
+      <th>mean px</th>
+      <th>median px</th>
+      <th>mean frame rank</th>
+      <th>winner frames</th>
+      <th>winner rate</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>FM SO100 60k</td>
+      <td>6.911</td>
+      <td>6.334</td>
+      <td>2.800</td>
+      <td>38</td>
+      <td>0.230</td>
+    </tr>
+    <tr>
+      <td>FM SO100 80k</td>
+      <td>6.878</td>
+      <td>5.700</td>
+      <td>2.921</td>
+      <td>26</td>
+      <td>0.158</td>
+    </tr>
+    <tr>
+      <td>MLP 80k</td>
+      <td>5.383</td>
+      <td>5.019</td>
+      <td>3.624</td>
+      <td>40</td>
+      <td>0.242</td>
+    </tr>
+    <tr>
+      <td>FM Cotrain 80k</td>
+      <td>5.170</td>
+      <td>4.512</td>
+      <td>3.818</td>
+      <td>30</td>
+      <td>0.182</td>
+    </tr>
+    <tr>
+      <td>FM 5xGrip 60k</td>
+      <td>4.806</td>
+      <td>4.646</td>
+      <td>3.897</td>
+      <td>9</td>
+      <td>0.055</td>
+    </tr>
+    <tr>
+      <td>FM 5xGrip 80k</td>
+      <td>4.838</td>
+      <td>5.134</td>
+      <td>3.939</td>
+      <td>22</td>
+      <td>0.133</td>
+    </tr>
+  </tbody>
+</table>
+  <h3>Final progress</h3>
+  <table class="dataframe data">
+  <thead>
+    <tr style="text-align: right;">
+      <th>model</th>
+      <th>mean px</th>
+      <th>median px</th>
+      <th>mean frame rank</th>
+      <th>winner frames</th>
+      <th>winner rate</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>FM SO100 80k</td>
+      <td>3.591</td>
+      <td>4.746</td>
+      <td>2.727</td>
+      <td>36</td>
+      <td>0.218</td>
+    </tr>
+    <tr>
+      <td>FM SO100 60k</td>
+      <td>3.120</td>
+      <td>4.538</td>
+      <td>3.006</td>
+      <td>21</td>
+      <td>0.127</td>
+    </tr>
+    <tr>
+      <td>FM 5xGrip 60k</td>
+      <td>2.390</td>
+      <td>2.790</td>
+      <td>3.673</td>
+      <td>16</td>
+      <td>0.097</td>
+    </tr>
+    <tr>
+      <td>FM 5xGrip 80k</td>
+      <td>2.135</td>
+      <td>3.415</td>
+      <td>3.697</td>
+      <td>21</td>
+      <td>0.127</td>
+    </tr>
+    <tr>
+      <td>MLP 80k</td>
+      <td>-0.908</td>
+      <td>-0.478</td>
+      <td>3.830</td>
+      <td>45</td>
+      <td>0.273</td>
+    </tr>
+    <tr>
+      <td>FM Cotrain 80k</td>
+      <td>0.207</td>
+      <td>2.403</td>
+      <td>4.067</td>
+      <td>26</td>
+      <td>0.158</td>
+    </tr>
+  </tbody>
+</table>
+  <h3>30-step direction cosine</h3>
+  <table class="dataframe data">
+  <thead>
+    <tr style="text-align: right;">
+      <th>model</th>
+      <th>mean cos</th>
+      <th>median cos</th>
+      <th>mean frame rank</th>
+      <th>winner frames</th>
+      <th>winner rate</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>FM SO100 80k</td>
+      <td>0.399</td>
+      <td>0.572</td>
+      <td>3.061</td>
+      <td>34</td>
+      <td>0.206</td>
+    </tr>
+    <tr>
+      <td>FM SO100 60k</td>
+      <td>0.367</td>
+      <td>0.551</td>
+      <td>3.152</td>
+      <td>15</td>
+      <td>0.091</td>
+    </tr>
+    <tr>
+      <td>MLP 80k</td>
+      <td>0.246</td>
+      <td>0.385</td>
+      <td>3.497</td>
+      <td>46</td>
+      <td>0.279</td>
+    </tr>
+    <tr>
+      <td>FM 5xGrip 60k</td>
+      <td>0.298</td>
+      <td>0.517</td>
+      <td>3.642</td>
+      <td>15</td>
+      <td>0.091</td>
+    </tr>
+    <tr>
+      <td>FM Cotrain 80k</td>
+      <td>0.281</td>
+      <td>0.543</td>
+      <td>3.806</td>
+      <td>28</td>
+      <td>0.170</td>
+    </tr>
+    <tr>
+      <td>FM 5xGrip 80k</td>
+      <td>0.249</td>
+      <td>0.461</td>
+      <td>3.842</td>
+      <td>27</td>
+      <td>0.164</td>
+    </tr>
+  </tbody>
+</table>
+  <img src="logs/so100_hpt/rollout_counterfactual_probe/so100_two_rollouts_near_apricot_exhaustive_counterfactual_threshold70_2026-05-25_analysis_frame_distributions.png" alt="frame metric distributions" />
+</section>
+
+<section>
+  <h2>Distance Bins</h2>
+  <img src="logs/so100_hpt/rollout_counterfactual_probe/so100_two_rollouts_near_apricot_exhaustive_counterfactual_threshold70_2026-05-25_analysis_phase_best_progress_heatmap.png" alt="phase best progress heatmap" />
+  <table class="dataframe data">
+  <thead>
+    <tr style="text-align: right;">
+      <th>phase</th>
+      <th>model</th>
+      <th>frames</th>
+      <th>best progress px</th>
+      <th>final progress px</th>
+      <th>30-step cos</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>close 0-30px</td>
+      <td>FM SO100 60k</td>
+      <td>95</td>
+      <td>6.461</td>
+      <td>1.977</td>
+      <td>0.415</td>
+    </tr>
+    <tr>
+      <td>close 0-30px</td>
+      <td>FM SO100 80k</td>
+      <td>95</td>
+      <td>6.302</td>
+      <td>2.480</td>
+      <td>0.433</td>
+    </tr>
+    <tr>
+      <td>close 0-30px</td>
+      <td>FM Cotrain 80k</td>
+      <td>95</td>
+      <td>4.279</td>
+      <td>-1.845</td>
+      <td>0.268</td>
+    </tr>
+    <tr>
+      <td>close 0-30px</td>
+      <td>FM 5xGrip 80k</td>
+      <td>95</td>
+      <td>4.139</td>
+      <td>1.287</td>
+      <td>0.257</td>
+    </tr>
+    <tr>
+      <td>close 0-30px</td>
+      <td>MLP 80k</td>
+      <td>95</td>
+      <td>3.976</td>
+      <td>-4.031</td>
+      <td>0.213</td>
+    </tr>
+    <tr>
+      <td>close 0-30px</td>
+      <td>FM 5xGrip 60k</td>
+      <td>95</td>
+      <td>3.839</td>
+      <td>1.279</td>
+      <td>0.288</td>
+    </tr>
+    <tr>
+      <td>near 30-50px</td>
+      <td>FM SO100 60k</td>
+      <td>47</td>
+      <td>7.583</td>
+      <td>5.007</td>
+      <td>0.328</td>
+    </tr>
+    <tr>
+      <td>near 30-50px</td>
+      <td>FM SO100 80k</td>
+      <td>47</td>
+      <td>7.267</td>
+      <td>5.161</td>
+      <td>0.328</td>
+    </tr>
+    <tr>
+      <td>near 30-50px</td>
+      <td>MLP 80k</td>
+      <td>47</td>
+      <td>7.077</td>
+      <td>3.218</td>
+      <td>0.280</td>
+    </tr>
+    <tr>
+      <td>near 30-50px</td>
+      <td>FM 5xGrip 80k</td>
+      <td>47</td>
+      <td>6.798</td>
+      <td>4.681</td>
+      <td>0.342</td>
+    </tr>
+    <tr>
+      <td>near 30-50px</td>
+      <td>FM 5xGrip 60k</td>
+      <td>47</td>
+      <td>6.165</td>
+      <td>4.358</td>
+      <td>0.353</td>
+    </tr>
+    <tr>
+      <td>near 30-50px</td>
+      <td>FM Cotrain 80k</td>
+      <td>47</td>
+      <td>6.033</td>
+      <td>3.158</td>
+      <td>0.279</td>
+    </tr>
+    <tr>
+      <td>approach 50-70px</td>
+      <td>FM SO100 80k</td>
+      <td>23</td>
+      <td>8.466</td>
+      <td>4.974</td>
+      <td>0.407</td>
+    </tr>
+    <tr>
+      <td>approach 50-70px</td>
+      <td>MLP 80k</td>
+      <td>23</td>
+      <td>7.735</td>
+      <td>3.561</td>
+      <td>0.313</td>
+    </tr>
+    <tr>
+      <td>approach 50-70px</td>
+      <td>FM SO100 60k</td>
+      <td>23</td>
+      <td>7.399</td>
+      <td>3.982</td>
+      <td>0.245</td>
+    </tr>
+    <tr>
+      <td>approach 50-70px</td>
+      <td>FM Cotrain 80k</td>
+      <td>23</td>
+      <td>7.086</td>
+      <td>2.652</td>
+      <td>0.335</td>
+    </tr>
+    <tr>
+      <td>approach 50-70px</td>
+      <td>FM 5xGrip 60k</td>
+      <td>23</td>
+      <td>6.026</td>
+      <td>2.955</td>
+      <td>0.227</td>
+    </tr>
+    <tr>
+      <td>approach 50-70px</td>
+      <td>FM 5xGrip 80k</td>
+      <td>23</td>
+      <td>3.721</td>
+      <td>0.437</td>
+      <td>0.028</td>
+    </tr>
+  </tbody>
+</table>
+</section>
+
+<section>
+  <h2>Rollout Split</h2>
+  <table class="dataframe data">
+  <thead>
+    <tr style="text-align: right;">
+      <th>rollout</th>
+      <th>model</th>
+      <th>best progress px</th>
+      <th>final progress px</th>
+      <th>30-step cos</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>prev 14-29-57</td>
+      <td>FM SO100 60k</td>
+      <td>5.088</td>
+      <td>-0.964</td>
+      <td>0.272</td>
+    </tr>
+    <tr>
+      <td>prev 14-29-57</td>
+      <td>FM SO100 80k</td>
+      <td>5.061</td>
+      <td>-0.711</td>
+      <td>0.351</td>
+    </tr>
+    <tr>
+      <td>prev 14-29-57</td>
+      <td>MLP 80k</td>
+      <td>3.962</td>
+      <td>-3.631</td>
+      <td>0.223</td>
+    </tr>
+    <tr>
+      <td>prev 14-29-57</td>
+      <td>FM 5xGrip 60k</td>
+      <td>3.846</td>
+      <td>0.415</td>
+      <td>0.163</td>
+    </tr>
+    <tr>
+      <td>prev 14-29-57</td>
+      <td>FM Cotrain 80k</td>
+      <td>3.702</td>
+      <td>-4.529</td>
+      <td>0.144</td>
+    </tr>
+    <tr>
+      <td>prev 14-29-57</td>
+      <td>FM 5xGrip 80k</td>
+      <td>3.103</td>
+      <td>-1.325</td>
+      <td>0.045</td>
+    </tr>
+    <tr>
+      <td>curr 14-49-43</td>
+      <td>FM SO100 60k</td>
+      <td>8.507</td>
+      <td>6.693</td>
+      <td>0.449</td>
+    </tr>
+    <tr>
+      <td>curr 14-49-43</td>
+      <td>FM SO100 80k</td>
+      <td>8.468</td>
+      <td>7.356</td>
+      <td>0.441</td>
+    </tr>
+    <tr>
+      <td>curr 14-49-43</td>
+      <td>MLP 80k</td>
+      <td>6.627</td>
+      <td>1.475</td>
+      <td>0.266</td>
+    </tr>
+    <tr>
+      <td>curr 14-49-43</td>
+      <td>FM Cotrain 80k</td>
+      <td>6.454</td>
+      <td>4.350</td>
+      <td>0.400</td>
+    </tr>
+    <tr>
+      <td>curr 14-49-43</td>
+      <td>FM 5xGrip 80k</td>
+      <td>6.357</td>
+      <td>5.163</td>
+      <td>0.428</td>
+    </tr>
+    <tr>
+      <td>curr 14-49-43</td>
+      <td>FM 5xGrip 60k</td>
+      <td>5.647</td>
+      <td>4.117</td>
+      <td>0.416</td>
+    </tr>
+  </tbody>
+</table>
+</section>
+
+<section>
+  <h2>Cotrain Pairwise Context</h2>
+  <p class="note">Here model_a is FM Cotrain 80k. Positive advantage means Cotrain is better under that metric.</p>
+  <table class="dataframe data">
+  <thead>
+    <tr style="text-align: right;">
+      <th>metric</th>
+      <th>compared with</th>
+      <th>cotrain better frames</th>
+      <th>other better frames</th>
+      <th>cotrain win rate</th>
+      <th>mean advantage</th>
+      <th>median advantage</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>30-step cos to apricot</td>
+      <td>FM SO100 60k</td>
+      <td>58</td>
+      <td>107</td>
+      <td>0.352</td>
+      <td>-0.086</td>
+      <td>-0.116</td>
+    </tr>
+    <tr>
+      <td>30-step cos to apricot</td>
+      <td>FM SO100 80k</td>
+      <td>62</td>
+      <td>103</td>
+      <td>0.376</td>
+      <td>-0.119</td>
+      <td>-0.133</td>
+    </tr>
+    <tr>
+      <td>30-step cos to apricot</td>
+      <td>FM 5xGrip 60k</td>
+      <td>77</td>
+      <td>88</td>
+      <td>0.467</td>
+      <td>-0.017</td>
+      <td>-0.060</td>
+    </tr>
+    <tr>
+      <td>30-step cos to apricot</td>
+      <td>FM 5xGrip 80k</td>
+      <td>84</td>
+      <td>81</td>
+      <td>0.509</td>
+      <td>0.031</td>
+      <td>0.010</td>
+    </tr>
+    <tr>
+      <td>best approach progress px</td>
+      <td>FM SO100 60k</td>
+      <td>55</td>
+      <td>110</td>
+      <td>0.333</td>
+      <td>-1.742</td>
+      <td>-2.781</td>
+    </tr>
+    <tr>
+      <td>best approach progress px</td>
+      <td>FM SO100 80k</td>
+      <td>55</td>
+      <td>110</td>
+      <td>0.333</td>
+      <td>-1.708</td>
+      <td>-2.601</td>
+    </tr>
+    <tr>
+      <td>best approach progress px</td>
+      <td>FM 5xGrip 60k</td>
+      <td>87</td>
+      <td>78</td>
+      <td>0.527</td>
+      <td>0.363</td>
+      <td>0.285</td>
+    </tr>
+    <tr>
+      <td>best approach progress px</td>
+      <td>FM 5xGrip 80k</td>
+      <td>87</td>
+      <td>78</td>
+      <td>0.527</td>
+      <td>0.331</td>
+      <td>0.478</td>
+    </tr>
+    <tr>
+      <td>final progress px</td>
+      <td>FM SO100 60k</td>
+      <td>54</td>
+      <td>111</td>
+      <td>0.327</td>
+      <td>-2.913</td>
+      <td>-3.798</td>
+    </tr>
+    <tr>
+      <td>final progress px</td>
+      <td>FM SO100 80k</td>
+      <td>45</td>
+      <td>120</td>
+      <td>0.273</td>
+      <td>-3.384</td>
+      <td>-4.293</td>
+    </tr>
+    <tr>
+      <td>final progress px</td>
+      <td>FM 5xGrip 60k</td>
+      <td>71</td>
+      <td>94</td>
+      <td>0.430</td>
+      <td>-2.183</td>
+      <td>-1.790</td>
+    </tr>
+    <tr>
+      <td>final progress px</td>
+      <td>FM 5xGrip 80k</td>
+      <td>70</td>
+      <td>95</td>
+      <td>0.424</td>
+      <td>-1.928</td>
+      <td>-1.834</td>
+    </tr>
+  </tbody>
+</table>
+</section>
+
+<section>
+  <h2>Artifacts</h2>
+  <p class="paths">Source CSVs: <code>logs/so100_hpt/rollout_counterfactual_probe/so100_two_rollouts_near_apricot_exhaustive_counterfactual_threshold70_2026-05-25_frame_model_means.csv</code>, <code>logs/so100_hpt/rollout_counterfactual_probe/so100_two_rollouts_near_apricot_exhaustive_counterfactual_threshold70_2026-05-25_summary.csv</code>, <code>logs/so100_hpt/rollout_counterfactual_probe/so100_two_rollouts_near_apricot_exhaustive_counterfactual_threshold70_2026-05-25_pairwise.csv</code>, <code>logs/so100_hpt/rollout_counterfactual_probe/so100_two_rollouts_near_apricot_exhaustive_counterfactual_threshold70_2026-05-25_win_counts.csv</code>.</p>
+  <p class="paths">Derived CSVs: <code>logs/so100_hpt/rollout_counterfactual_probe/so100_two_rollouts_near_apricot_exhaustive_counterfactual_threshold70_2026-05-25_analysis_frame_rankings.csv</code>, <code>logs/so100_hpt/rollout_counterfactual_probe/so100_two_rollouts_near_apricot_exhaustive_counterfactual_threshold70_2026-05-25_analysis_overall_summary_table.csv</code>, <code>logs/so100_hpt/rollout_counterfactual_probe/so100_two_rollouts_near_apricot_exhaustive_counterfactual_threshold70_2026-05-25_analysis_rollout_table.csv</code>, <code>logs/so100_hpt/rollout_counterfactual_probe/so100_two_rollouts_near_apricot_exhaustive_counterfactual_threshold70_2026-05-25_analysis_phase_table.csv</code>.</p>
+</section>
+</main>
+</body>
+</html>

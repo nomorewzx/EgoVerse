@@ -172,6 +172,331 @@ class InterpolateLinear(Transform):
         return batch
 
 
+class SmoothQuaternionPoseRotations(Transform):
+    """Smooth only the rotation part of a pose chunk stored as xyz + quat(wxyz)."""
+
+    def __init__(
+        self,
+        pose_key: str,
+        output_key: str | None = None,
+        window: int = 9,
+        sigma: float | None = 2.0,
+    ):
+        if window < 1 or window % 2 != 1:
+            raise ValueError(f"window must be a positive odd integer, got {window}")
+        self.pose_key = pose_key
+        self.output_key = output_key or pose_key
+        self.window = int(window)
+        self.sigma = sigma
+
+    def transform(self, batch: dict) -> dict:
+        poses = np.asarray(batch[self.pose_key])
+        if poses.ndim != 2 or poses.shape[-1] != 7:
+            raise ValueError(
+                f"SmoothQuaternionPoseRotations expects (T, 7), got {poses.shape} "
+                f"for key '{self.pose_key}'"
+            )
+        if len(poses) <= 1 or self.window == 1:
+            batch[self.output_key] = poses.copy()
+            return batch
+
+        out = poses.astype(np.float64, copy=True)
+        quat_wxyz = out[:, 3:7]
+        norms = np.linalg.norm(quat_wxyz, axis=-1, keepdims=True)
+        if np.any(norms <= 0.0):
+            raise ValueError(f"Encountered zero-norm quaternion in '{self.pose_key}'")
+
+        rotations = R.from_quat((quat_wxyz / norms)[:, [1, 2, 3, 0]])
+        half = self.window // 2
+        base_weights = self._weights()
+        smoothed = []
+        for idx in range(len(rotations)):
+            lo = max(0, idx - half)
+            hi = min(len(rotations), idx + half + 1)
+            weight_lo = half - (idx - lo)
+            weight_hi = weight_lo + (hi - lo)
+            smoothed.append(
+                rotations[lo:hi].mean(weights=base_weights[weight_lo:weight_hi])
+            )
+
+        quat_xyzw = R.concatenate(smoothed).as_quat()
+        out[:, 3:7] = quat_xyzw[:, [3, 0, 1, 2]]
+        batch[self.output_key] = out.astype(poses.dtype, copy=False)
+        return batch
+
+    def _weights(self) -> np.ndarray:
+        if self.sigma is None:
+            return np.ones(self.window, dtype=np.float64) / float(self.window)
+        half = self.window // 2
+        offsets = np.arange(-half, half + 1, dtype=np.float64)
+        weights = np.exp(-0.5 * (offsets / max(float(self.sigma), 1e-12)) ** 2)
+        return weights / np.sum(weights)
+
+
+class SmoothPoseXYZInternalRatioAdaptive(Transform):
+    """Adaptively smooth XYZ only on internal high-frequency pose-chunk frames.
+
+    This transform is intended for human action chunks after they have been
+    expressed in the current head frame and before YPR conversion/interpolation.
+    It uses an HF-ratio gate plus an absolute residual gate so nearly-stationary
+    tiny denominators do not smooth the whole chunk.
+    """
+
+    _AXIS_TO_INDEX = {"x": 0, "y": 1, "z": 2}
+
+    def __init__(
+        self,
+        pose_key: str,
+        output_key: str | None = None,
+        axes: str = "xyz",
+        window: int = 9,
+        sigma: float | None = 2.0,
+        ratio_window: int = 17,
+        ratio_smooth_window: int = 5,
+        ratio_smooth_sigma: float | None = 2.0,
+        ratio_threshold: float = 0.5,
+        residual_threshold_m: float = 0.003,
+        max_alpha: float = 1.0,
+        internal_margin: int | None = None,
+        exclude_tail_padding: bool = True,
+        tail_pad_atol_m: float = 1e-6,
+        oscillation_window: int = 9,
+        min_sign_flips: int = 2,
+        oscillation_deadband_m: float = 5e-4,
+    ):
+        for name, value in (
+            ("window", window),
+            ("ratio_window", ratio_window),
+            ("ratio_smooth_window", ratio_smooth_window),
+            ("oscillation_window", oscillation_window),
+        ):
+            if value < 1 or value % 2 != 1:
+                raise ValueError(f"{name} must be a positive odd integer, got {value}")
+        if ratio_threshold < 0.0:
+            raise ValueError(
+                f"ratio_threshold must be non-negative, got {ratio_threshold}"
+            )
+        if residual_threshold_m < 0.0:
+            raise ValueError(
+                f"residual_threshold_m must be non-negative, got {residual_threshold_m}"
+            )
+        if not (0.0 <= max_alpha <= 1.0):
+            raise ValueError(f"max_alpha must be in [0, 1], got {max_alpha}")
+
+        axis_indices = []
+        for axis in axes.lower():
+            if axis not in self._AXIS_TO_INDEX:
+                raise ValueError(
+                    f"Unsupported XYZ smoothing axis '{axis}' in axes={axes!r}"
+                )
+            axis_indices.append(self._AXIS_TO_INDEX[axis])
+        if not axis_indices:
+            raise ValueError("axes must contain at least one of x, y, z")
+
+        self.pose_key = pose_key
+        self.output_key = output_key or pose_key
+        self.axis_indices = tuple(dict.fromkeys(axis_indices))
+        self.window = int(window)
+        self.sigma = sigma
+        self.ratio_window = int(ratio_window)
+        self.ratio_smooth_window = int(ratio_smooth_window)
+        self.ratio_smooth_sigma = ratio_smooth_sigma
+        self.ratio_threshold = float(ratio_threshold)
+        self.residual_threshold_m = float(residual_threshold_m)
+        self.max_alpha = float(max_alpha)
+        self.internal_margin = (
+            int(internal_margin)
+            if internal_margin is not None
+            else max(self.window // 2, self.ratio_window // 2)
+        )
+        self.exclude_tail_padding = bool(exclude_tail_padding)
+        self.tail_pad_atol_m = float(tail_pad_atol_m)
+        self.oscillation_window = int(oscillation_window)
+        self.min_sign_flips = int(min_sign_flips)
+        self.oscillation_deadband_m = float(oscillation_deadband_m)
+
+    def transform(self, batch: dict) -> dict:
+        poses = np.asarray(batch[self.pose_key])
+        if poses.ndim != 2 or poses.shape[-1] < 3:
+            raise ValueError(
+                f"SmoothPoseXYZInternalRatioAdaptive expects (T, D>=3), got "
+                f"{poses.shape} for key '{self.pose_key}'"
+            )
+        if len(poses) <= 2 or self.window == 1 or self.max_alpha <= 0.0:
+            batch[self.output_key] = poses.copy()
+            return batch
+
+        out = poses.astype(np.float64, copy=True)
+        xyz = out[:, :3]
+        smooth_xyz = self._smooth_array(xyz, self.window, self.sigma)
+        residual = xyz - smooth_xyz
+        residual_norm = np.linalg.norm(residual[:, self.axis_indices], axis=1)
+        ratio = self._local_hf_ratio(
+            xyz[:, self.axis_indices],
+            smooth_xyz[:, self.axis_indices],
+            self.ratio_window,
+        )
+        ratio_smooth = self._smooth_ratio(ratio)
+
+        valid = self._internal_valid_mask(xyz)
+        mask = (
+            valid
+            & (ratio_smooth >= self.ratio_threshold)
+            & (residual_norm >= self.residual_threshold_m)
+        )
+        if self.min_sign_flips > 0:
+            flips = self._local_sign_flips(
+                residual[:, self.axis_indices],
+                self.oscillation_window,
+                self.oscillation_deadband_m,
+            )
+            mask &= flips >= self.min_sign_flips
+
+        if np.any(mask):
+            ratio_score = (ratio_smooth - self.ratio_threshold) / max(
+                self.ratio_threshold, 1e-12
+            )
+            residual_score = (residual_norm - self.residual_threshold_m) / max(
+                self.residual_threshold_m, 1e-12
+            )
+            alpha = np.clip(np.minimum(ratio_score, residual_score), 0.0, 1.0)
+            alpha = (alpha * self.max_alpha)[:, None]
+            blended = (1.0 - alpha) * xyz + alpha * smooth_xyz
+            for axis_idx in self.axis_indices:
+                out[mask, axis_idx] = blended[mask, axis_idx]
+
+        batch[self.output_key] = out.astype(poses.dtype, copy=False)
+        return batch
+
+    @staticmethod
+    def _weights(window: int, sigma: float | None) -> np.ndarray:
+        if sigma is None:
+            return np.ones(window, dtype=np.float64) / float(window)
+        half = window // 2
+        offsets = np.arange(-half, half + 1, dtype=np.float64)
+        weights = np.exp(-0.5 * (offsets / max(float(sigma), 1e-12)) ** 2)
+        return weights / np.sum(weights)
+
+    @classmethod
+    def _smooth_array(
+        cls,
+        values: np.ndarray,
+        window: int,
+        sigma: float | None,
+    ) -> np.ndarray:
+        values = np.asarray(values, dtype=np.float64)
+        if len(values) <= 1 or window <= 1:
+            return values.copy()
+        half = window // 2
+        base_weights = cls._weights(window, sigma)
+        out = np.empty_like(values, dtype=np.float64)
+        for idx in range(len(values)):
+            lo = max(0, idx - half)
+            hi = min(len(values), idx + half + 1)
+            weight_lo = half - (idx - lo)
+            weight_hi = weight_lo + (hi - lo)
+            weights = base_weights[weight_lo:weight_hi]
+            weights = weights / np.sum(weights)
+            out[idx] = np.sum(values[lo:hi] * weights[:, None], axis=0)
+        return out
+
+    @classmethod
+    def _smooth_scalar(
+        cls,
+        values: np.ndarray,
+        window: int,
+        sigma: float | None,
+    ) -> np.ndarray:
+        return cls._smooth_array(values[:, None], window, sigma)[:, 0]
+
+    @staticmethod
+    def _median_filter_1d(values: np.ndarray, window: int) -> np.ndarray:
+        values = np.asarray(values, dtype=np.float64)
+        if len(values) <= 1 or window <= 1:
+            return values.copy()
+        half = window // 2
+        out = np.empty_like(values, dtype=np.float64)
+        for idx in range(len(values)):
+            lo = max(0, idx - half)
+            hi = min(len(values), idx + half + 1)
+            out[idx] = np.median(values[lo:hi])
+        return out
+
+    def _smooth_ratio(self, ratio: np.ndarray) -> np.ndarray:
+        smoothed = np.asarray(ratio, dtype=np.float64)
+        if self.ratio_smooth_window > 1:
+            smoothed = self._median_filter_1d(smoothed, self.ratio_smooth_window)
+            smoothed = self._smooth_scalar(
+                smoothed,
+                self.ratio_smooth_window,
+                self.ratio_smooth_sigma,
+            )
+        return smoothed
+
+    @staticmethod
+    def _local_hf_ratio(
+        xyz: np.ndarray,
+        smooth_xyz: np.ndarray,
+        window: int,
+    ) -> np.ndarray:
+        residual = xyz - smooth_xyz
+        half = window // 2
+        ratio = np.zeros(len(xyz), dtype=np.float64)
+        for idx in range(len(xyz)):
+            lo = max(0, idx - half)
+            hi = min(len(xyz), idx + half + 1)
+            if hi - lo < 3:
+                ratio[idx] = 0.0
+                continue
+            residual_energy = np.mean(np.sum(residual[lo:hi] ** 2, axis=1))
+            centered = xyz[lo:hi] - np.mean(xyz[lo:hi], axis=0, keepdims=True)
+            centered_energy = np.mean(np.sum(centered**2, axis=1))
+            ratio[idx] = residual_energy / max(centered_energy, 1e-12)
+        return ratio
+
+    def _internal_valid_mask(self, xyz: np.ndarray) -> np.ndarray:
+        count = len(xyz)
+        valid_hi = count
+        if self.exclude_tail_padding and count >= 2:
+            step = np.linalg.norm(np.diff(xyz, axis=0), axis=1)
+            idx = len(step) - 1
+            while idx >= 0 and step[idx] <= self.tail_pad_atol_m:
+                idx -= 1
+            if idx < len(step) - 1:
+                valid_hi = max(1, idx + 2)
+
+        lo = self.internal_margin
+        hi = max(lo, valid_hi - self.internal_margin)
+        frame_ids = np.arange(count)
+        return (frame_ids >= lo) & (frame_ids < hi)
+
+    @staticmethod
+    def _local_sign_flips(
+        values: np.ndarray,
+        window: int,
+        deadband: float,
+    ) -> np.ndarray:
+        values = np.asarray(values, dtype=np.float64)
+        half = window // 2
+        flips = np.zeros(len(values), dtype=np.int64)
+        for idx in range(len(values)):
+            lo = max(0, idx - half)
+            hi = min(len(values), idx + half + 1)
+            if hi - lo < 4:
+                continue
+            local_max = 0
+            diffs = np.diff(values[lo:hi], axis=0)
+            for axis_idx in range(diffs.shape[1]):
+                axis_diff = diffs[:, axis_idx]
+                signs = np.sign(axis_diff)
+                signs[np.abs(axis_diff) <= deadband] = 0.0
+                signs = signs[signs != 0.0]
+                if len(signs) >= 2:
+                    local_max = max(local_max, int(np.sum(signs[1:] != signs[:-1])))
+            flips[idx] = local_max
+        return flips
+
+
 # ---------------------------------------------------------------------------
 # Coordinate Transforms
 # ---------------------------------------------------------------------------
@@ -627,6 +952,7 @@ def build_so100_singlearm_transform_list(
     *,
     obs_raw_key: str = "obs_ee_pose_cam_rotvec",
     action_raw_key: str = "cmd_ee_pose_cam_rotvec",
+    force_proxy_key: str | None = None,
     obs_pose_key: str = "so100.obs_pose_rotvec",
     obs_gripper_key: str = "so100.obs_gripper",
     action_pose_key: str = "so100.action_pose_rotvec",
@@ -644,6 +970,10 @@ def build_so100_singlearm_transform_list(
     ``[x, y, z, wx, wy, wz, gripper]``. The transform only converts rotvec to
     yaw/pitch/roll and turns the command stream into a future action chunk.
     """
+
+    tensor_keys = [actions_key, obs_key]
+    if force_proxy_key is not None:
+        tensor_keys.append(force_proxy_key)
 
     return [
         SplitKeys(
@@ -687,5 +1017,5 @@ def build_so100_singlearm_transform_list(
                 action_pose_key,
             ]
         ),
-        NumpyToTensor(keys=[actions_key, obs_key]),
+        NumpyToTensor(keys=tensor_keys),
     ]

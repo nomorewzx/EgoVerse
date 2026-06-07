@@ -1,0 +1,171 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>so100_xyz_cotrain_cuda_smoke_oneframe_2026-05-26</title>
+  <style>
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; margin: 24px; color: #202124; }
+    main { max-width: 1180px; margin: 0 auto; }
+    table { border-collapse: collapse; width: 100%; font-size: 13px; margin: 12px 0 28px; }
+    th, td { border: 1px solid #ddd; padding: 6px 8px; text-align: right; }
+    th:first-child, td:first-child { text-align: left; }
+    th { background: #f5f5f5; }
+    img { max-width: 100%; display: block; margin: 14px 0 26px; border: 1px solid #ddd; }
+    code { background: #f4f4f4; padding: 2px 4px; }
+    .note { color: #5f6368; }
+  </style>
+</head>
+<body>
+<main>
+  <h1>so100_xyz_cotrain_cuda_smoke_oneframe_2026-05-26</h1>
+  <p class="note">Same candidate frames and seeds as the referenced base summary; FM seeds are averaged per frame before model comparison.</p>
+  <h2>Overall</h2>
+  <img src="logs/so100_hpt/rollout_counterfactual_probe/so100_xyz_cotrain_cuda_smoke_oneframe_2026-05-26_overall_metrics.png" alt="overall metrics">
+  <table border="1" class="dataframe">
+  <thead>
+    <tr style="text-align: right;">
+      <th>model</th>
+      <th>n_frames</th>
+      <th>first10_cos_to_target_mean_mean</th>
+      <th>exec_best_progress_px_mean</th>
+      <th>exec_final_progress_px_mean</th>
+      <th>exec_min_distance_px_mean</th>
+      <th>pred_close_rate_mean</th>
+      <th>pred_gripper_max_mean</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>fm_xyz_cotrain_30k</td>
+      <td>1</td>
+      <td>0.9878</td>
+      <td>38.1986</td>
+      <td>38.1986</td>
+      <td>20.5977</td>
+      <td>0.0000</td>
+      <td>29.9848</td>
+    </tr>
+    <tr>
+      <td>fm_cotrain_full_60k</td>
+      <td>1</td>
+      <td>0.9954</td>
+      <td>29.1581</td>
+      <td>29.1581</td>
+      <td>29.6382</td>
+      <td>0.0000</td>
+      <td>29.3941</td>
+    </tr>
+  </tbody>
+</table>
+  <h2>Phase Final Progress</h2>
+  <img src="logs/so100_hpt/rollout_counterfactual_probe/so100_xyz_cotrain_cuda_smoke_oneframe_2026-05-26_phase_final_progress.png" alt="phase final progress">
+  <h2>Selected Pairwise Comparisons</h2>
+  <table border="1" class="dataframe">
+  <thead>
+    <tr style="text-align: right;">
+      <th>rollout</th>
+      <th>phase</th>
+      <th>metric</th>
+      <th>model_a</th>
+      <th>model_b</th>
+      <th>a_better_frames</th>
+      <th>b_better_frames</th>
+      <th>ties</th>
+      <th>n_frames</th>
+      <th>a_win_rate</th>
+      <th>mean_a_advantage</th>
+      <th>median_a_advantage</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>both</td>
+      <td>all</td>
+      <td>exec_best_progress_px</td>
+      <td>fm_xyz_cotrain_30k</td>
+      <td>fm_cotrain_full_60k</td>
+      <td>1</td>
+      <td>0</td>
+      <td>0</td>
+      <td>1</td>
+      <td>1.0000</td>
+      <td>9.0405</td>
+      <td>9.0405</td>
+    </tr>
+    <tr>
+      <td>both</td>
+      <td>all</td>
+      <td>exec_final_progress_px</td>
+      <td>fm_xyz_cotrain_30k</td>
+      <td>fm_cotrain_full_60k</td>
+      <td>1</td>
+      <td>0</td>
+      <td>0</td>
+      <td>1</td>
+      <td>1.0000</td>
+      <td>9.0405</td>
+      <td>9.0405</td>
+    </tr>
+    <tr>
+      <td>both</td>
+      <td>all</td>
+      <td>first10_cos_to_target_mean</td>
+      <td>fm_xyz_cotrain_30k</td>
+      <td>fm_cotrain_full_60k</td>
+      <td>0</td>
+      <td>1</td>
+      <td>0</td>
+      <td>1</td>
+      <td>0.0000</td>
+      <td>-0.0076</td>
+      <td>-0.0076</td>
+    </tr>
+    <tr>
+      <td>both</td>
+      <td>approach_50_70</td>
+      <td>exec_best_progress_px</td>
+      <td>fm_xyz_cotrain_30k</td>
+      <td>fm_cotrain_full_60k</td>
+      <td>1</td>
+      <td>0</td>
+      <td>0</td>
+      <td>1</td>
+      <td>1.0000</td>
+      <td>9.0405</td>
+      <td>9.0405</td>
+    </tr>
+    <tr>
+      <td>both</td>
+      <td>approach_50_70</td>
+      <td>exec_final_progress_px</td>
+      <td>fm_xyz_cotrain_30k</td>
+      <td>fm_cotrain_full_60k</td>
+      <td>1</td>
+      <td>0</td>
+      <td>0</td>
+      <td>1</td>
+      <td>1.0000</td>
+      <td>9.0405</td>
+      <td>9.0405</td>
+    </tr>
+    <tr>
+      <td>both</td>
+      <td>approach_50_70</td>
+      <td>first10_cos_to_target_mean</td>
+      <td>fm_xyz_cotrain_30k</td>
+      <td>fm_cotrain_full_60k</td>
+      <td>0</td>
+      <td>1</td>
+      <td>0</td>
+      <td>1</td>
+      <td>0.0000</td>
+      <td>-0.0076</td>
+      <td>-0.0076</td>
+    </tr>
+  </tbody>
+</table>
+  <h2>Artifacts</h2>
+  <p><code>logs/so100_hpt/rollout_counterfactual_probe/so100_xyz_cotrain_cuda_smoke_oneframe_2026-05-26_seed_rows.csv</code></p><p><code>logs/so100_hpt/rollout_counterfactual_probe/so100_xyz_cotrain_cuda_smoke_oneframe_2026-05-26_frame_model_means.csv</code></p><p><code>logs/so100_hpt/rollout_counterfactual_probe/so100_xyz_cotrain_cuda_smoke_oneframe_2026-05-26_summary.csv</code></p><p><code>logs/so100_hpt/rollout_counterfactual_probe/so100_xyz_cotrain_cuda_smoke_oneframe_2026-05-26_pairwise.csv</code></p><p><code>logs/so100_hpt/rollout_counterfactual_probe/so100_xyz_cotrain_cuda_smoke_oneframe_2026-05-26_overall_metrics.png</code></p><p><code>logs/so100_hpt/rollout_counterfactual_probe/so100_xyz_cotrain_cuda_smoke_oneframe_2026-05-26_phase_final_progress.png</code></p>
+</main>
+</body>
+</html>
