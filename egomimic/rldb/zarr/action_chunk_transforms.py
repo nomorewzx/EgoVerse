@@ -1019,3 +1019,36 @@ def build_so100_singlearm_transform_list(
         ),
         NumpyToTensor(keys=tensor_keys),
     ]
+
+
+def build_so100_singlearm_joint_transform_list(
+    *,
+    obs_raw_key: str = "obs_joint_pos",
+    action_raw_key: str = "cmd_joint_pos",
+    actions_key: str = "actions_joint",
+    obs_key: str = "observations.state.joint_pos",
+    chunk_length: int = 64,
+    stride: int = 1,
+) -> list[Transform]:
+    """Build the SO100 joint-space single-arm transform.
+
+    Raw arrays are ``[shoulder_pan, shoulder_lift, elbow_flex, wrist_flex,
+    wrist_roll, gripper]``. Joint-space chunks use linear interpolation for all
+    dimensions because there is no pose rotation representation to unwrap.
+    """
+
+    return [
+        InterpolateLinear(
+            new_chunk_length=chunk_length,
+            action_key=action_raw_key,
+            output_action_key=actions_key,
+            stride=stride,
+        ),
+        ConcatKeys(
+            key_list=[obs_raw_key],
+            new_key_name=obs_key,
+            delete_old_keys=True,
+        ),
+        DeleteKeys(keys_to_delete=[action_raw_key]),
+        NumpyToTensor(keys=[actions_key, obs_key]),
+    ]

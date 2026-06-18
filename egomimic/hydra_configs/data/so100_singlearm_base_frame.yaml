@@ -5,13 +5,13 @@ train_datasets:
     _target_: egomimic.rldb.zarr.zarr_dataset_multi.MultiDataset._from_resolver
     resolver:
       _target_: egomimic.rldb.zarr.zarr_dataset_multi.LocalEpisodeResolver
-      folder_path: ${oc.env:SO100_HPT_ZARR_ROOT,/home/zxwang/so100-apricot-all-noforce-egoverse-zarr-2026-06}
+      folder_path: ${oc.env:SO100_HPT_BASE_ZARR_ROOT,/home/zxwang/so100-apricot-all-base-noforce-egoverse-zarr-2026-06}
       key_map:
         _target_: egomimic.rldb.embodiment.so100.So100SingleArm.get_keymap
-        mode: camera_frame_ypr
+        mode: base_frame_ypr
       transform_list:
         _target_: egomimic.rldb.embodiment.so100.So100SingleArm.get_transform_list
-        mode: camera_frame_ypr
+        mode: base_frame_ypr
         chunk_length: 100
     filters:
       _target_: egomimic.rldb.filters.DatasetFilter
@@ -25,13 +25,13 @@ valid_datasets:
     _target_: egomimic.rldb.zarr.zarr_dataset_multi.MultiDataset._from_resolver
     resolver:
       _target_: egomimic.rldb.zarr.zarr_dataset_multi.LocalEpisodeResolver
-      folder_path: ${oc.env:SO100_HPT_ZARR_ROOT,/home/zxwang/so100-apricot-all-noforce-egoverse-zarr-2026-06}
+      folder_path: ${oc.env:SO100_HPT_BASE_ZARR_ROOT,/home/zxwang/so100-apricot-all-base-noforce-egoverse-zarr-2026-06}
       key_map:
         _target_: egomimic.rldb.embodiment.so100.So100SingleArm.get_keymap
-        mode: camera_frame_ypr
+        mode: base_frame_ypr
       transform_list:
         _target_: egomimic.rldb.embodiment.so100.So100SingleArm.get_transform_list
-        mode: camera_frame_ypr
+        mode: base_frame_ypr
         chunk_length: 100
     filters:
       _target_: egomimic.rldb.filters.DatasetFilter
