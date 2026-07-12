@@ -1,0 +1,22 @@
+_target_: egomimic.rldb.zarr.utils.DataSchematic
+norm_mode: quantile
+schematic_dict:
+  so100_singlearm:
+    front_img_1:
+      key_type: camera_keys
+      zarr_key: observations.images.front_img_1
+    front_img_2:
+      key_type: camera_keys
+      zarr_key: observations.images.front_img_2
+    joint_pos:
+      key_type: proprio_keys
+      zarr_key: observations.state.joint_pos
+    joint_load:
+      key_type: proprio_keys
+      zarr_key: observations.state.joint_load
+    actions_joint:
+      key_type: action_keys
+      zarr_key: actions_joint
+    embodiment:
+      key_type: metadata_keys
+      zarr_key: metadata.embodiment

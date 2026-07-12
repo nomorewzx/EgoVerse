@@ -30,6 +30,8 @@ from egomimic.utils.logging_utils import log_hyperparameters
 from egomimic.utils.pylogger import RankedLogger
 from egomimic.utils.utils import extras, task_wrapper
 
+torch.multiprocessing.set_sharing_strategy("file_system")
+
 OmegaConf.register_new_resolver("eval", eval)
 log = RankedLogger(__name__, rank_zero_only=True)
 

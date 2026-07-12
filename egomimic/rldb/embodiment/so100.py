@@ -26,6 +26,8 @@ class So100SingleArm(Embodiment):
             "camera_frame_ypr_force",
             "base_frame_ypr",
             "joint",
+            "joint_load",
+            "joint_load_dual_camera",
         ] = "camera_frame_ypr",
         chunk_length: int | None = None,
         stride: int | None = None,
@@ -35,14 +37,22 @@ class So100SingleArm(Embodiment):
             "camera_frame_ypr_force",
             "base_frame_ypr",
             "joint",
+            "joint_load",
+            "joint_load_dual_camera",
         }:
             raise ValueError(
                 f"Unsupported SO100 transform mode '{mode}'. "
                 "Expected 'camera_frame_ypr', 'camera_frame_ypr_force', "
-                "'base_frame_ypr', or 'joint'."
+                "'base_frame_ypr', 'joint', 'joint_load', or "
+                "'joint_load_dual_camera'."
             )
-        if mode == "joint":
+        if mode in {"joint", "joint_load", "joint_load_dual_camera"}:
             return build_so100_singlearm_joint_transform_list(
+                load_raw_key=(
+                    "obs_joint_load"
+                    if mode in {"joint_load", "joint_load_dual_camera"}
+                    else None
+                ),
                 chunk_length=chunk_length or cls.ACTION_CHUNK_LENGTH,
                 stride=stride or cls.ACTION_STRIDE,
             )
@@ -75,6 +85,8 @@ class So100SingleArm(Embodiment):
             "camera_frame_ypr_force",
             "base_frame_ypr",
             "joint",
+            "joint_load",
+            "joint_load_dual_camera",
         ] = "camera_frame_ypr",
     ):
         if keymap_mode not in {
@@ -82,11 +94,14 @@ class So100SingleArm(Embodiment):
             "camera_frame_ypr_force",
             "base_frame_ypr",
             "joint",
+            "joint_load",
+            "joint_load_dual_camera",
         }:
             raise ValueError(
                 f"Unsupported SO100 keymap mode '{keymap_mode}'. "
                 "Expected 'camera_frame_ypr', 'camera_frame_ypr_force', "
-                "'base_frame_ypr', or 'joint'."
+                "'base_frame_ypr', 'joint', 'joint_load', or "
+                "'joint_load_dual_camera'."
             )
         keymap = {
             cls.VIZ_IMAGE_KEY: {
@@ -94,7 +109,12 @@ class So100SingleArm(Embodiment):
                 "zarr_key": "images.front_1",
             },
         }
-        if keymap_mode == "joint":
+        if keymap_mode == "joint_load_dual_camera":
+            keymap["observations.images.front_img_2"] = {
+                "key_type": "camera_keys",
+                "zarr_key": "images.front_2",
+            }
+        if keymap_mode in {"joint", "joint_load", "joint_load_dual_camera"}:
             keymap.update(
                 {
                     "obs_joint_pos": {
@@ -108,6 +128,11 @@ class So100SingleArm(Embodiment):
                     },
                 }
             )
+            if keymap_mode in {"joint_load", "joint_load_dual_camera"}:
+                keymap["obs_joint_load"] = {
+                    "key_type": "proprio_keys",
+                    "zarr_key": "obs_joint_load",
+                }
             return keymap
 
         obs_zarr_key = (

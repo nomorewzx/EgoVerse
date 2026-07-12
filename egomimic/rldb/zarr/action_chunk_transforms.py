@@ -1025,8 +1025,10 @@ def build_so100_singlearm_joint_transform_list(
     *,
     obs_raw_key: str = "obs_joint_pos",
     action_raw_key: str = "cmd_joint_pos",
+    load_raw_key: str | None = None,
     actions_key: str = "actions_joint",
     obs_key: str = "observations.state.joint_pos",
+    load_key: str = "observations.state.joint_load",
     chunk_length: int = 64,
     stride: int = 1,
 ) -> list[Transform]:
@@ -1037,7 +1039,7 @@ def build_so100_singlearm_joint_transform_list(
     dimensions because there is no pose rotation representation to unwrap.
     """
 
-    return [
+    transforms: list[Transform] = [
         InterpolateLinear(
             new_chunk_length=chunk_length,
             action_key=action_raw_key,
@@ -1049,6 +1051,23 @@ def build_so100_singlearm_joint_transform_list(
             new_key_name=obs_key,
             delete_old_keys=True,
         ),
-        DeleteKeys(keys_to_delete=[action_raw_key]),
-        NumpyToTensor(keys=[actions_key, obs_key]),
     ]
+    tensor_keys = [actions_key, obs_key]
+    keys_to_delete = [action_raw_key]
+    if load_raw_key is not None:
+        transforms.append(
+            ConcatKeys(
+                key_list=[load_raw_key],
+                new_key_name=load_key,
+                delete_old_keys=True,
+            )
+        )
+        tensor_keys.append(load_key)
+
+    transforms.extend(
+        [
+            DeleteKeys(keys_to_delete=keys_to_delete),
+            NumpyToTensor(keys=tensor_keys),
+        ]
+    )
+    return transforms

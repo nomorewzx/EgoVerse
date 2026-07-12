@@ -24,6 +24,7 @@ import torch
 from scipy.spatial.transform import Rotation as R
 
 from egomimic.pl_utils.pl_model import ModelWrapper
+from egomimic.rldb.embodiment.embodiment import get_embodiment_id
 from egomimic.robot.robot_utils import RateLoop
 from egomimic.utils.egomimicUtils import interpolate_arr_euler
 
@@ -59,9 +60,47 @@ ARM_JOINT_NAMES = [
     "wrist_roll",
 ]
 GRIPPER_NAME = "gripper"
-ACTION_KEY = "so100_singlearm_actions_cartesian"
+ACTION_REPRESENTATION_CAMERA_YPR = "camera_ypr"
+ACTION_REPRESENTATION_BASE_YPR = "base_ypr"
+ACTION_REPRESENTATION_JOINT = "joint"
+ACTION_REPRESENTATIONS = (
+    ACTION_REPRESENTATION_CAMERA_YPR,
+    ACTION_REPRESENTATION_BASE_YPR,
+    ACTION_REPRESENTATION_JOINT,
+)
+ACTION_KEY_BY_REPRESENTATION = {
+    ACTION_REPRESENTATION_CAMERA_YPR: "so100_singlearm_actions_cartesian",
+    ACTION_REPRESENTATION_BASE_YPR: "so100_singlearm_actions_cartesian",
+    ACTION_REPRESENTATION_JOINT: "so100_singlearm_actions_joint",
+}
+RAW_STATE_KEY_BY_REPRESENTATION = {
+    ACTION_REPRESENTATION_CAMERA_YPR: "observations.state.ee_pose",
+    ACTION_REPRESENTATION_BASE_YPR: "observations.state.ee_pose",
+    ACTION_REPRESENTATION_JOINT: "observations.state.joint_pos",
+}
+RAW_ACTION_KEY_BY_REPRESENTATION = {
+    ACTION_REPRESENTATION_CAMERA_YPR: "actions_cartesian",
+    ACTION_REPRESENTATION_BASE_YPR: "actions_cartesian",
+    ACTION_REPRESENTATION_JOINT: "actions_joint",
+}
+ACTION_DIM_BY_REPRESENTATION = {
+    ACTION_REPRESENTATION_CAMERA_YPR: 7,
+    ACTION_REPRESENTATION_BASE_YPR: 7,
+    ACTION_REPRESENTATION_JOINT: 6,
+}
 DEFAULT_QUERY_FREQUENCY = 30
 DEFAULT_RESAMPLED_ACTION_LEN = 45
+DEFAULT_TOP_RAW_IMAGE_KEY = "observations.images.front_img_1"
+DEFAULT_WRIST_RAW_IMAGE_KEY = "observations.images.front_img_2"
+RAW_CAMERA_KEY_BY_NAME = {
+    "front_img_1": DEFAULT_TOP_RAW_IMAGE_KEY,
+    "front_img_2": DEFAULT_WRIST_RAW_IMAGE_KEY,
+}
+RAW_PROPRIO_KEY_BY_NAME = {
+    "joint_pos": "observations.state.joint_pos",
+    "joint_load": "observations.state.joint_load",
+    "ee_pose": "observations.state.ee_pose",
+}
 
 
 def load_lerobot_arm_joint_limits_deg(calibration_fpath: str | Path) -> np.ndarray:
@@ -248,7 +287,19 @@ class SO100HPTPolicy:
         precision: str,
         action_horizon: int | None,
         bgr_to_rgb: bool,
+        action_representation: str,
     ):
+        if action_representation not in ACTION_REPRESENTATIONS:
+            raise ValueError(
+                f"action_representation must be one of {ACTION_REPRESENTATIONS!r}, "
+                f"got {action_representation!r}"
+            )
+        self.action_representation = str(action_representation)
+        self.prediction_key = ACTION_KEY_BY_REPRESENTATION[self.action_representation]
+        self.raw_state_key = RAW_STATE_KEY_BY_REPRESENTATION[self.action_representation]
+        self.raw_action_key = RAW_ACTION_KEY_BY_REPRESENTATION[self.action_representation]
+        self.action_dim = ACTION_DIM_BY_REPRESENTATION[self.action_representation]
+
         requested_device = torch.device(device)
         if requested_device.type == "cuda" and not torch.cuda.is_available():
             raise RuntimeError("CUDA was requested but torch.cuda.is_available() is false")
@@ -268,6 +319,46 @@ class SO100HPTPolicy:
         self.wrapper = self.wrapper.to(self.device)
         self.wrapper.eval()
         self.wrapper.model.device = self.device
+        self.embodiment_name = "so100_singlearm"
+        self.embodiment_id = get_embodiment_id(self.embodiment_name)
+        self.expected_proprio_keys = list(
+            getattr(self.wrapper.model, "proprio_keys", {}).get(self.embodiment_id, [])
+        )
+        self.expected_camera_keys = list(
+            getattr(self.wrapper.model, "camera_keys", {}).get(self.embodiment_id, [])
+        )
+        self.expected_raw_proprio_keys: dict[str, str] = {}
+        self.expected_raw_camera_keys: dict[str, str] = {}
+        data_schematic = getattr(self.wrapper.model, "data_schematic", None)
+        if data_schematic is not None:
+            for key in self.expected_proprio_keys:
+                raw_key = data_schematic.keyname_to_zarr_key(key, self.embodiment_id)
+                if raw_key is not None:
+                    self.expected_raw_proprio_keys[key] = raw_key
+            for key in self.expected_camera_keys:
+                raw_key = data_schematic.keyname_to_zarr_key(key, self.embodiment_id)
+                if raw_key is not None:
+                    self.expected_raw_camera_keys[key] = raw_key
+        for key in self.expected_proprio_keys:
+            if key not in self.expected_raw_proprio_keys and key in RAW_PROPRIO_KEY_BY_NAME:
+                self.expected_raw_proprio_keys[key] = RAW_PROPRIO_KEY_BY_NAME[key]
+        for key in self.expected_camera_keys:
+            if key not in self.expected_raw_camera_keys and key in RAW_CAMERA_KEY_BY_NAME:
+                self.expected_raw_camera_keys[key] = RAW_CAMERA_KEY_BY_NAME[key]
+        if not self.expected_raw_camera_keys:
+            self.expected_camera_keys = ["front_img_1"]
+            self.expected_raw_camera_keys = {"front_img_1": DEFAULT_TOP_RAW_IMAGE_KEY}
+        self.expected_raw_camera_key_set = set(self.expected_raw_camera_keys.values())
+        self.requires_wrist_image = DEFAULT_WRIST_RAW_IMAGE_KEY in self.expected_raw_camera_key_set
+        self.unsupported_raw_camera_keys = sorted(
+            self.expected_raw_camera_key_set
+            - {DEFAULT_TOP_RAW_IMAGE_KEY, DEFAULT_WRIST_RAW_IMAGE_KEY}
+        )
+        self.extra_raw_state_keys = sorted(
+            raw_key
+            for raw_key in set(self.expected_raw_proprio_keys.values())
+            if raw_key != self.raw_state_key
+        )
         self.head = self.wrapper.model.nets["policy"].heads["so100_singlearm"]
         self.diffusion = bool(getattr(self.wrapper.model, "diffusion", False))
         self.head_action_horizon = getattr(self.head, "action_horizon", None)
@@ -294,9 +385,16 @@ class SO100HPTPolicy:
         print(
             "[so100] policy head: "
             f"{self.head.__class__.__name__} diffusion={self.diffusion} "
+            f"action_representation={self.action_representation} "
+            f"prediction_key={self.prediction_key} "
             f"head_action_horizon={self.head_action_horizon} "
             f"rollout_action_horizon={self.action_horizon} "
-            f"num_inference_steps={self.num_inference_steps}"
+            f"num_inference_steps={self.num_inference_steps} "
+            f"camera_keys={self.expected_camera_keys} "
+            f"raw_camera_keys={self.expected_raw_camera_keys} "
+            f"requires_wrist_image={self.requires_wrist_image} "
+            f"proprio_keys={self.expected_proprio_keys} "
+            f"extra_raw_state_keys={self.extra_raw_state_keys}"
         )
 
     def _autocast(self):
@@ -322,28 +420,90 @@ class SO100HPTPolicy:
             front = front / 255.0
         return front
 
-    def _build_raw_batch(self, image: np.ndarray, ee_camera_ypr: np.ndarray) -> dict:
+    def expects_raw_state_key(self, raw_key: str) -> bool:
+        return raw_key == self.raw_state_key or raw_key in self.extra_raw_state_keys
+
+    def _build_raw_batch(
+        self,
+        image: np.ndarray,
+        policy_state: np.ndarray,
+        extra_raw_states: dict[str, np.ndarray] | None = None,
+        *,
+        wrist_image: np.ndarray | None = None,
+    ) -> dict:
+        if self.unsupported_raw_camera_keys:
+            raise ValueError(
+                "Checkpoint expects camera keys not wired by this rollout script: "
+                f"{self.unsupported_raw_camera_keys}. Supported live keys are "
+                f"{DEFAULT_TOP_RAW_IMAGE_KEY!r} and {DEFAULT_WRIST_RAW_IMAGE_KEY!r}."
+            )
         front = self._image_to_chw_float(image)
-        ee = torch.as_tensor(np.asarray(ee_camera_ypr, dtype=np.float32))
-        dummy_actions = ee.view(1, 7).repeat(self.action_horizon, 1)
-        return {
+        state = torch.as_tensor(np.asarray(policy_state, dtype=np.float32))
+        if state.shape != (self.action_dim,):
+            raise ValueError(
+                f"{self.action_representation} policy state must have shape "
+                f"({self.action_dim},), got {tuple(state.shape)}"
+            )
+        dummy_actions = state.view(1, self.action_dim).repeat(self.action_horizon, 1)
+        batch = {
             "so100_singlearm": {
                 "observations.images.front_img_1": front.unsqueeze(0),
-                "observations.state.ee_pose": ee.unsqueeze(0),
-                "actions_cartesian": dummy_actions.unsqueeze(0),
+                self.raw_state_key: state.unsqueeze(0),
+                self.raw_action_key: dummy_actions.unsqueeze(0),
             }
         }
+        if self.requires_wrist_image:
+            if wrist_image is None:
+                raise ValueError(
+                    f"Checkpoint expects {DEFAULT_WRIST_RAW_IMAGE_KEY!r}, but no wrist image "
+                    "was provided to policy.predict()."
+                )
+            wrist = self._image_to_chw_float(wrist_image)
+            batch["so100_singlearm"][DEFAULT_WRIST_RAW_IMAGE_KEY] = wrist.unsqueeze(0)
+        if extra_raw_states:
+            valid_raw_keys = set(self.expected_raw_proprio_keys.values())
+            for raw_key, value in extra_raw_states.items():
+                if raw_key not in valid_raw_keys:
+                    raise ValueError(
+                        f"Raw state key {raw_key!r} is not in checkpoint proprio schema "
+                        f"{sorted(valid_raw_keys)}"
+                    )
+                if raw_key in batch["so100_singlearm"]:
+                    raise ValueError(f"Raw state key {raw_key!r} is already set")
+                tensor = torch.as_tensor(np.asarray(value, dtype=np.float32))
+                if tensor.ndim != 1:
+                    raise ValueError(
+                        f"Extra raw state {raw_key!r} must be 1D, got shape {tuple(tensor.shape)}"
+                    )
+                batch["so100_singlearm"][raw_key] = tensor.unsqueeze(0)
+        return batch
 
-    def predict(self, image: np.ndarray, ee_camera_ypr: np.ndarray) -> np.ndarray:
-        raw_batch = self._build_raw_batch(image, ee_camera_ypr)
+    def predict(
+        self,
+        image: np.ndarray,
+        policy_state: np.ndarray,
+        extra_raw_states: dict[str, np.ndarray] | None = None,
+        *,
+        wrist_image: np.ndarray | None = None,
+    ) -> np.ndarray:
+        raw_batch = self._build_raw_batch(
+            image,
+            policy_state,
+            extra_raw_states,
+            wrist_image=wrist_image,
+        )
         with torch.inference_mode(), self._autocast():
             processed = self.wrapper.model.process_batch_for_training(raw_batch)
             preds = self.wrapper.model.forward_eval(processed)
-        if ACTION_KEY not in preds:
-            raise KeyError(f"Expected prediction key {ACTION_KEY}, got {list(preds.keys())}")
-        chunk = preds[ACTION_KEY].detach().float().cpu().numpy().squeeze(0)
-        if chunk.ndim != 2 or chunk.shape[1] != 7:
-            raise ValueError(f"Expected action chunk shape (T,7), got {chunk.shape}")
+        if self.prediction_key not in preds:
+            raise KeyError(
+                f"Expected prediction key {self.prediction_key}, got {list(preds.keys())}"
+            )
+        chunk = preds[self.prediction_key].detach().float().cpu().numpy().squeeze(0)
+        if chunk.ndim != 2 or chunk.shape[1] != self.action_dim:
+            raise ValueError(
+                f"Expected action chunk shape (T,{self.action_dim}), got {chunk.shape}"
+            )
         return chunk.astype(np.float32, copy=False)
 
 
@@ -765,6 +925,7 @@ class OfflineZarrSource:
         self.path = Path(args.offline_zarr_episode).expanduser()
         self.group = zarr.open(str(self.path), mode="r")
         self.frame = int(args.offline_frame_index)
+        self.action_representation = args.action_representation
         self.q = as_float_array(args.offline_current_joints, 5, "--offline-current-joints")
         if self.q is None:
             self.q = np.zeros(5, dtype=np.float64)
@@ -777,18 +938,41 @@ class OfflineZarrSource:
         pass
 
     def observe(self) -> dict[str, Any]:
-        idx = self.frame % int(self.group["obs_ee_pose_cam_rotvec"].shape[0])
+        if self.action_representation == ACTION_REPRESENTATION_JOINT:
+            state_key = "obs_joint_pos"
+        elif self.action_representation == ACTION_REPRESENTATION_BASE_YPR:
+            state_key = "obs_ee_pose_base_rotvec"
+        else:
+            state_key = "obs_ee_pose_cam_rotvec"
+        idx = self.frame % int(self.group[state_key].shape[0])
         self.frame += 1
         image = decode_jpeg_value(self.group["images.front_1"][idx])
-        ee_ypr = rotvec_pose7_to_ypr_pose7(np.asarray(self.group["obs_ee_pose_cam_rotvec"][idx]))
-        self.gripper = float(ee_ypr[6])
-        return {
+        record = {
             "image": image,
             "q": self.q.copy(),
             "gripper": self.gripper,
-            "ee_camera_ypr_override": ee_ypr,
             "raw": {"offline_frame_index": idx},
         }
+        if self.action_representation == ACTION_REPRESENTATION_JOINT:
+            joint_pos = np.asarray(self.group["obs_joint_pos"][idx], dtype=np.float64)
+            if joint_pos.shape != (6,):
+                raise ValueError(f"obs_joint_pos must have shape (6,), got {joint_pos.shape}")
+            self.q = joint_pos[:5].copy()
+            self.gripper = float(joint_pos[5])
+            record["q"] = self.q.copy()
+            record["gripper"] = self.gripper
+            record["joint_pos_override"] = joint_pos
+        elif self.action_representation == ACTION_REPRESENTATION_BASE_YPR:
+            ee_ypr = rotvec_pose7_to_ypr_pose7(np.asarray(self.group["obs_ee_pose_base_rotvec"][idx]))
+            self.gripper = float(ee_ypr[6])
+            record["gripper"] = self.gripper
+            record["ee_base_ypr_override"] = ee_ypr
+        else:
+            ee_ypr = rotvec_pose7_to_ypr_pose7(np.asarray(self.group["obs_ee_pose_cam_rotvec"][idx]))
+            self.gripper = float(ee_ypr[6])
+            record["gripper"] = self.gripper
+            record["ee_camera_ypr_override"] = ee_ypr
+        return record
 
     def send(self, q: np.ndarray, gripper: float) -> dict[str, Any]:
         self.q = np.asarray(q, dtype=np.float64).copy()
@@ -875,6 +1059,43 @@ def resample_camera_ypr_chunk(chunk: np.ndarray, target_len: int) -> np.ndarray:
     return interpolate_arr_euler(actions[None, ...], target_len)[0].astype(np.float32)
 
 
+def resample_linear_chunk(chunk: np.ndarray, target_len: int) -> np.ndarray:
+    actions = np.asarray(chunk, dtype=np.float64)
+    if actions.ndim != 2:
+        raise ValueError(f"Expected action chunk shape (T, D), got {actions.shape}")
+    if target_len <= 0:
+        raise ValueError(f"target_len must be positive, got {target_len}")
+    if actions.shape[0] == target_len:
+        return actions.astype(np.float32, copy=False)
+    if actions.shape[0] == 1:
+        return np.repeat(actions, target_len, axis=0).astype(np.float32)
+
+    old_time = np.linspace(0.0, 1.0, actions.shape[0])
+    new_time = np.linspace(0.0, 1.0, target_len)
+    out = np.empty((target_len, actions.shape[1]), dtype=np.float64)
+    for dim in range(actions.shape[1]):
+        out[:, dim] = np.interp(new_time, old_time, actions[:, dim])
+    return out.astype(np.float32)
+
+
+def resample_action_chunk(
+    chunk: np.ndarray,
+    target_len: int,
+    action_representation: str,
+) -> np.ndarray:
+    if action_representation in {
+        ACTION_REPRESENTATION_CAMERA_YPR,
+        ACTION_REPRESENTATION_BASE_YPR,
+    }:
+        return resample_camera_ypr_chunk(chunk, target_len)
+    if action_representation == ACTION_REPRESENTATION_JOINT:
+        actions = np.asarray(chunk)
+        if actions.ndim != 2 or actions.shape[1] != 6:
+            raise ValueError(f"Expected joint action chunk shape (T, 6), got {actions.shape}")
+        return resample_linear_chunk(actions, target_len)
+    raise ValueError(f"Unsupported action representation: {action_representation}")
+
+
 def angle_delta_norm(a: np.ndarray, b: np.ndarray) -> float:
     delta = np.asarray(a, dtype=np.float64) - np.asarray(b, dtype=np.float64)
     delta = (delta + np.pi) % (2.0 * np.pi) - np.pi
@@ -888,6 +1109,7 @@ def blend_replanned_chunk(
     tail_start: int,
     blend_steps: int,
     dims: str,
+    action_representation: str,
 ) -> tuple[np.ndarray, dict[str, Any]]:
     if blend_steps <= 0 or previous_chunk is None:
         return new_chunk, {
@@ -898,6 +1120,8 @@ def blend_replanned_chunk(
 
     if dims not in {"pose", "all"}:
         raise ValueError(f"Unsupported blend dims: {dims}")
+    if action_representation not in ACTION_REPRESENTATIONS:
+        raise ValueError(f"Unsupported action representation: {action_representation}")
 
     old_tail = previous_chunk[tail_start:]
     n = min(int(blend_steps), len(old_tail), len(new_chunk))
@@ -908,12 +1132,21 @@ def blend_replanned_chunk(
         "reference_chunk_shape": list(previous_chunk.shape),
         "requested_steps": int(blend_steps),
         "dims": dims,
+        "action_representation": action_representation,
     }
     if n <= 0:
         return new_chunk, info
 
     out = new_chunk.copy()
-    dim_slice = slice(0, 6) if dims == "pose" else slice(None)
+    if dims == "all":
+        dim_slice = slice(None)
+    elif action_representation in {
+        ACTION_REPRESENTATION_CAMERA_YPR,
+        ACTION_REPRESENTATION_BASE_YPR,
+    }:
+        dim_slice = slice(0, 6)
+    else:
+        dim_slice = slice(0, 5)
     pre = new_chunk[:n].copy()
     ref = old_tail[:n].copy()
     for i in range(n):
@@ -921,6 +1154,14 @@ def blend_replanned_chunk(
         out[i, dim_slice] = alpha * new_chunk[i, dim_slice] + (1.0 - alpha) * ref[i, dim_slice]
 
     info["alphas"] = [float(i + 1) / float(n) for i in range(n)]
+    info["max_blend_delta"] = float(np.max(np.abs(out[:n, dim_slice] - pre[:, dim_slice])))
+    info["max_gripper_delta"] = float(np.max(np.abs(out[:n, -1] - pre[:, -1])))
+    if action_representation == ACTION_REPRESENTATION_JOINT:
+        info["pre_first_joint_gap_deg"] = float(np.max(np.abs(pre[0, :5] - ref[0, :5])))
+        info["post_first_joint_gap_deg"] = float(np.max(np.abs(out[0, :5] - ref[0, :5])))
+        info["max_joint_blend_delta_deg"] = float(np.max(np.abs(out[:n, :5] - pre[:, :5])))
+        return out, info
+
     info["pre_first_pos_gap_m"] = float(np.linalg.norm(pre[0, :3] - ref[0, :3]))
     info["post_first_pos_gap_m"] = float(np.linalg.norm(out[0, :3] - ref[0, :3]))
     info["pre_first_rot_gap_rad"] = angle_delta_norm(pre[0, 3:6], ref[0, 3:6])
@@ -929,7 +1170,6 @@ def blend_replanned_chunk(
     info["max_rot_delta_rad"] = float(
         np.max([angle_delta_norm(out[i, 3:6], pre[i, 3:6]) for i in range(n)])
     )
-    info["max_gripper_delta"] = float(np.max(np.abs(out[:n, 6] - pre[:, 6])))
     return out, info
 
 
@@ -983,7 +1223,10 @@ def rollout_start_record(
     record["log_jsonl"] = None if log_path is None else str(log_path)
     record["record_video"] = bool(args.record_video)
     record["video_path"] = None if video_path is None else str(video_path)
-    record["action_key"] = ACTION_KEY
+    record["action_representation"] = args.action_representation
+    record["action_key"] = policy.prediction_key
+    record["raw_state_key"] = policy.raw_state_key
+    record["raw_action_key"] = policy.raw_action_key
     record["policy_head_class"] = policy.head.__class__.__name__
     record["policy_diffusion"] = bool(policy.diffusion)
     record["policy_head_action_horizon"] = (
@@ -993,6 +1236,9 @@ def rollout_start_record(
     record["policy_num_inference_steps"] = (
         None if policy.num_inference_steps is None else int(policy.num_inference_steps)
     )
+    record["policy_expected_camera_keys"] = list(policy.expected_camera_keys)
+    record["policy_expected_raw_camera_keys"] = dict(policy.expected_raw_camera_keys)
+    record["policy_requires_wrist_image"] = bool(policy.requires_wrist_image)
     if arm_joint_limits_deg is not None:
         record["arm_joint_limits_deg"] = np.asarray(arm_joint_limits_deg, dtype=np.float64).tolist()
     return record
@@ -1014,6 +1260,34 @@ def current_camera_pose_from_observation(
             float(obs["gripper"]),
         )
     return current_base_T_ee, current_ee_camera_ypr
+
+
+def current_base_ypr_from_observation(
+    obs: dict[str, Any],
+    current_base_T_ee: np.ndarray,
+) -> np.ndarray:
+    if "ee_base_ypr_override" in obs:
+        base_ypr = np.asarray(obs["ee_base_ypr_override"], dtype=np.float32)
+        if base_ypr.shape != (7,):
+            raise ValueError(f"Expected ee_base_ypr_override shape (7,), got {base_ypr.shape}")
+        return base_ypr
+    return matrix_to_pose7_ypr(current_base_T_ee, float(obs["gripper"]))
+
+
+def current_joint_pos_from_observation(obs: dict[str, Any]) -> np.ndarray:
+    if "joint_pos_override" in obs:
+        joint_pos = np.asarray(obs["joint_pos_override"], dtype=np.float64)
+    else:
+        joint_pos = np.concatenate(
+            [
+                np.asarray(obs["q"], dtype=np.float64),
+                np.asarray([float(obs["gripper"])], dtype=np.float64),
+            ],
+            axis=0,
+        )
+    if joint_pos.shape != (6,):
+        raise ValueError(f"Expected current joint policy state shape (6,), got {joint_pos.shape}")
+    return joint_pos.astype(np.float32)
 
 
 def run(args: argparse.Namespace) -> None:
@@ -1081,6 +1355,7 @@ def run(args: argparse.Namespace) -> None:
         precision=args.precision,
         action_horizon=args.action_horizon,
         bgr_to_rgb=args.bgr_to_rgb,
+        action_representation=args.action_representation,
     )
     safety = SO100Safety(
         workspace_min=workspace_min,
@@ -1110,6 +1385,7 @@ def run(args: argparse.Namespace) -> None:
     video_path = build_video_path(args)
 
     print(f"[so100] checkpoint: {args.checkpoint}")
+    print(f"[so100] action_representation: {args.action_representation}")
     print(f"[so100] dry_run: {dry_run}  enable_motors: {args.enable_motors}")
     print(
         f"[so100] query_frequency: {args.query_frequency} at {args.frequency} Hz "
@@ -1150,9 +1426,21 @@ def run(args: argparse.Namespace) -> None:
                 kinematics,
                 bridge,
             )
+            warm_current_base_T_ee = kinematics.fk(np.asarray(warm_obs["q"], dtype=np.float64))
+            warm_base_ypr = current_base_ypr_from_observation(
+                warm_obs,
+                warm_current_base_T_ee,
+            )
+            warm_joint_pos = current_joint_pos_from_observation(warm_obs)
+            if args.action_representation == ACTION_REPRESENTATION_JOINT:
+                warm_policy_state = warm_joint_pos
+            elif args.action_representation == ACTION_REPRESENTATION_BASE_YPR:
+                warm_policy_state = warm_base_ypr
+            else:
+                warm_policy_state = warm_ee_camera_ypr
             start = time.perf_counter()
             for _ in range(args.warmup_iters):
-                _ = policy.predict(warm_obs["image"], warm_ee_camera_ypr)
+                _ = policy.predict(warm_obs["image"], warm_policy_state)
             print(
                 f"[so100] warmed policy with {args.warmup_iters} iterations "
                 f"in {(time.perf_counter() - start) * 1000.0:.1f} ms"
@@ -1225,17 +1513,36 @@ def run(args: argparse.Namespace) -> None:
                     kinematics,
                     bridge,
                 )
+                current_ee_base_ypr = current_base_ypr_from_observation(
+                    obs,
+                    current_base_T_ee,
+                )
+                current_joint_pos = current_joint_pos_from_observation(obs)
+                if args.action_representation == ACTION_REPRESENTATION_JOINT:
+                    policy_state = current_joint_pos
+                elif args.action_representation == ACTION_REPRESENTATION_BASE_YPR:
+                    policy_state = current_ee_base_ypr
+                else:
+                    policy_state = current_ee_camera_ypr
                 record["ee_camera_ypr"] = current_ee_camera_ypr.tolist()
+                record["ee_base_ypr"] = current_ee_base_ypr.tolist()
+                record["joint_pos"] = current_joint_pos.tolist()
+                record["policy_state"] = policy_state.tolist()
 
                 should_query = step % args.query_frequency == 0 or not action_queue
                 if should_query:
-                    infer_t = timed(lambda: policy.predict(obs["image"], current_ee_camera_ypr))
+                    infer_t = timed(lambda: policy.predict(obs["image"], policy_state))
                     last_prediction = infer_t.value
-                    pred_gripper_chunk = last_prediction[:, 6].astype(np.float64, copy=False)
+                    gripper_index = last_prediction.shape[1] - 1
+                    pred_gripper_chunk = last_prediction[:, gripper_index].astype(
+                        np.float64,
+                        copy=False,
+                    )
                     if args.resampled_action_len > 0:
-                        action_chunk = resample_camera_ypr_chunk(
+                        action_chunk = resample_action_chunk(
                             last_prediction,
                             args.resampled_action_len,
+                            args.action_representation,
                         )
                         pre_blend_action_chunk = action_chunk.copy()
                         blend_tail_start = args.action_start_index + args.query_frequency
@@ -1245,6 +1552,7 @@ def run(args: argparse.Namespace) -> None:
                             tail_start=blend_tail_start,
                             blend_steps=args.rollout_blend_steps,
                             dims=args.rollout_blend_dims,
+                            action_representation=args.action_representation,
                         )
                         start = args.action_start_index
                         stop = start + args.query_frequency
@@ -1272,12 +1580,18 @@ def run(args: argparse.Namespace) -> None:
                         selected_prediction = last_prediction[action_indices]
                         action_selection_mode = "stride"
 
-                    action_chunk_gripper = action_chunk[:, 6].astype(np.float64, copy=False)
-                    pre_blend_action_chunk_gripper = pre_blend_action_chunk[:, 6].astype(
+                    action_chunk_gripper = action_chunk[:, gripper_index].astype(
                         np.float64,
                         copy=False,
                     )
-                    executed_gripper_chunk = selected_prediction[:, 6].astype(np.float64, copy=False)
+                    pre_blend_action_chunk_gripper = pre_blend_action_chunk[:, gripper_index].astype(
+                        np.float64,
+                        copy=False,
+                    )
+                    executed_gripper_chunk = selected_prediction[:, gripper_index].astype(
+                        np.float64,
+                        copy=False,
+                    )
                     action_queue.clear()
                     action_queue.extend(selected_prediction)
                     last_action_chunk = action_chunk.copy()
@@ -1300,7 +1614,7 @@ def run(args: argparse.Namespace) -> None:
                     )
                     record["action_stride"] = args.action_stride
                     record["queued_actions"] = len(action_queue)
-                    record["policy_input_gripper"] = float(current_ee_camera_ypr[6])
+                    record["policy_input_gripper"] = float(policy_state[gripper_index])
                     record["pred_gripper_chunk"] = pred_gripper_chunk.tolist()
                     record["pred_gripper_chunk_stats"] = numeric_sequence_stats(pred_gripper_chunk)
                     record["pre_blend_action_chunk_gripper"] = (
@@ -1321,74 +1635,197 @@ def run(args: argparse.Namespace) -> None:
                         executed_gripper_chunk - current_gripper
                     ).tolist()
                     record["executed_gripper_delta_from_policy_input_chunk"] = (
-                        executed_gripper_chunk - float(current_ee_camera_ypr[6])
+                        executed_gripper_chunk - float(policy_state[gripper_index])
                     ).tolist()
                 else:
                     record["query"] = False
 
                 if not action_queue:
                     raise RuntimeError("action_queue is empty after query handling")
-                target_camera_ypr = np.asarray(action_queue.popleft(), dtype=np.float64)
-                last_target_camera_ypr = target_camera_ypr.copy()
-                target_base_T_ee = bridge.camera_ypr_to_base_T_ee(target_camera_ypr)
-                raw_target_base_xyz = target_base_T_ee[:3, 3].copy()
+                target_action = np.asarray(action_queue.popleft(), dtype=np.float64)
                 current_base_xyz = current_base_T_ee[:3, 3].copy()
-                clipped_base_T_ee = safety.clip_target_pose(current_base_T_ee, target_base_T_ee)
-                target_gripper = float(target_camera_ypr[6])
 
-                ik_t = timed(lambda: kinematics.ik(q_current, clipped_base_T_ee))
-                q_ik = ik_t.value
-                record["ik_ms"] = ik_t.ms
+                if args.action_representation == ACTION_REPRESENTATION_JOINT:
+                    if target_action.shape != (6,):
+                        raise ValueError(
+                            f"Expected joint target action shape (6,), got {target_action.shape}"
+                        )
+                    q_policy_target = target_action[:5].copy()
+                    target_gripper = float(target_action[5])
+                    raw_target_base_T_ee = kinematics.fk(q_policy_target)
+                    raw_target_base_xyz = raw_target_base_T_ee[:3, 3].copy()
+                    q_safe, gripper_safe = safety.clip_joint_target(
+                        q_current,
+                        q_policy_target,
+                        current_gripper,
+                        target_gripper,
+                    )
+                    _, gripper_clip_debug = safety.clip_gripper_target(
+                        current_gripper,
+                        target_gripper,
+                    )
+                    clipped_base_T_ee = kinematics.fk(q_safe)
+                    target_camera_ypr = bridge.base_T_ee_to_camera_ypr(
+                        raw_target_base_T_ee,
+                        target_gripper,
+                    )
+                    last_target_camera_ypr = target_camera_ypr.copy()
+                    ik_pos_error = float("nan")
+                    q_ik = q_policy_target.copy()
+                    target_delta_xyz_m = float(
+                        np.linalg.norm(raw_target_base_xyz - current_base_xyz)
+                    )
+                    raw_target_base_delta_xyz_m = target_delta_xyz_m
+                    clipped_target_delta_xyz_m = float(
+                        np.linalg.norm(clipped_base_T_ee[:3, 3] - current_base_xyz)
+                    )
+                    target_pose_clip_delta_xyz_m = float(
+                        np.linalg.norm(clipped_base_T_ee[:3, 3] - raw_target_base_xyz)
+                    )
+                    record["ik_ms"] = 0.0
+                    record["ik_pos_error_m"] = ik_pos_error
+                    record["q_ik"] = q_ik.tolist()
+                    record["target_joint_pos"] = target_action.tolist()
+                    record["q_policy_target"] = q_policy_target.tolist()
+                    record["target_joint_delta_deg"] = (q_policy_target - q_current).tolist()
+                    record["target_joint_abs_delta_max_deg"] = float(
+                        np.max(np.abs(q_policy_target - q_current))
+                    )
+                elif args.action_representation == ACTION_REPRESENTATION_BASE_YPR:
+                    if target_action.shape != (7,):
+                        raise ValueError(
+                            f"Expected base target action shape (7,), got {target_action.shape}"
+                        )
+                    target_base_ypr = target_action
+                    target_base_T_ee = pose7_ypr_to_matrix(target_base_ypr)
+                    raw_target_base_xyz = target_base_T_ee[:3, 3].copy()
+                    clipped_base_T_ee = safety.clip_target_pose(
+                        current_base_T_ee,
+                        target_base_T_ee,
+                    )
+                    target_gripper = float(target_base_ypr[6])
+                    target_camera_ypr = bridge.base_T_ee_to_camera_ypr(
+                        target_base_T_ee,
+                        target_gripper,
+                    )
+                    last_target_camera_ypr = target_camera_ypr.copy()
+
+                    ik_t = timed(lambda: kinematics.ik(q_current, clipped_base_T_ee))
+                    q_ik = ik_t.value
+                    record["ik_ms"] = ik_t.ms
+                    if q_ik is None:
+                        record["skip_reason"] = "ik_nonfinite"
+                        logger.write(record)
+                        print(f"[so100] step {step}: IK returned non-finite values; skipping")
+                        continue
+
+                    solved_base_T_ee = kinematics.fk(q_ik)
+                    ik_pos_error = safety.ik_position_error(solved_base_T_ee, clipped_base_T_ee)
+                    record["ik_pos_error_m"] = ik_pos_error
+                    record["q_ik"] = q_ik.tolist()
+                    if ik_pos_error > safety.max_ik_pos_error_m:
+                        record["ik_warning"] = "ik_pos_error"
+                        if not dry_run:
+                            record["skip_reason"] = "ik_pos_error"
+                            logger.write(record)
+                            print(
+                                f"[so100] step {step}: IK pos error {ik_pos_error:.4f} m "
+                                f"> {safety.max_ik_pos_error_m:.4f} m; skipping"
+                            )
+                            continue
+
+                    q_safe, gripper_safe = safety.clip_joint_target(
+                        q_current,
+                        q_ik,
+                        current_gripper,
+                        target_gripper,
+                    )
+                    _, gripper_clip_debug = safety.clip_gripper_target(
+                        current_gripper,
+                        target_gripper,
+                    )
+                    target_delta_xyz_m = float(
+                        np.linalg.norm(target_base_ypr[:3] - current_ee_base_ypr[:3])
+                    )
+                    raw_target_base_delta_xyz_m = float(
+                        np.linalg.norm(raw_target_base_xyz - current_base_xyz)
+                    )
+                    clipped_target_delta_xyz_m = float(
+                        np.linalg.norm(clipped_base_T_ee[:3, 3] - current_base_xyz)
+                    )
+                    target_pose_clip_delta_xyz_m = float(
+                        np.linalg.norm(clipped_base_T_ee[:3, 3] - raw_target_base_xyz)
+                    )
+                    record["target_base_ypr"] = target_base_ypr.tolist()
+                else:
+                    if target_action.shape != (7,):
+                        raise ValueError(
+                            f"Expected camera target action shape (7,), got {target_action.shape}"
+                        )
+                    target_camera_ypr = target_action
+                    last_target_camera_ypr = target_camera_ypr.copy()
+                    target_base_T_ee = bridge.camera_ypr_to_base_T_ee(target_camera_ypr)
+                    raw_target_base_xyz = target_base_T_ee[:3, 3].copy()
+                    clipped_base_T_ee = safety.clip_target_pose(
+                        current_base_T_ee,
+                        target_base_T_ee,
+                    )
+                    target_gripper = float(target_camera_ypr[6])
+
+                    ik_t = timed(lambda: kinematics.ik(q_current, clipped_base_T_ee))
+                    q_ik = ik_t.value
+                    record["ik_ms"] = ik_t.ms
+                    if q_ik is None:
+                        record["skip_reason"] = "ik_nonfinite"
+                        logger.write(record)
+                        print(f"[so100] step {step}: IK returned non-finite values; skipping")
+                        continue
+
+                    solved_base_T_ee = kinematics.fk(q_ik)
+                    ik_pos_error = safety.ik_position_error(solved_base_T_ee, clipped_base_T_ee)
+                    record["ik_pos_error_m"] = ik_pos_error
+                    record["q_ik"] = q_ik.tolist()
+                    if ik_pos_error > safety.max_ik_pos_error_m:
+                        record["ik_warning"] = "ik_pos_error"
+                        if not dry_run:
+                            record["skip_reason"] = "ik_pos_error"
+                            logger.write(record)
+                            print(
+                                f"[so100] step {step}: IK pos error {ik_pos_error:.4f} m "
+                                f"> {safety.max_ik_pos_error_m:.4f} m; skipping"
+                            )
+                            continue
+
+                    q_safe, gripper_safe = safety.clip_joint_target(
+                        q_current,
+                        q_ik,
+                        current_gripper,
+                        target_gripper,
+                    )
+                    _, gripper_clip_debug = safety.clip_gripper_target(
+                        current_gripper,
+                        target_gripper,
+                    )
+                    target_delta_xyz_m = float(
+                        np.linalg.norm(target_camera_ypr[:3] - current_ee_camera_ypr[:3])
+                    )
+                    raw_target_base_delta_xyz_m = float(
+                        np.linalg.norm(raw_target_base_xyz - current_base_xyz)
+                    )
+                    clipped_target_delta_xyz_m = float(
+                        np.linalg.norm(clipped_base_T_ee[:3, 3] - current_base_xyz)
+                    )
+                    target_pose_clip_delta_xyz_m = float(
+                        np.linalg.norm(clipped_base_T_ee[:3, 3] - raw_target_base_xyz)
+                    )
+
+                record["target_action"] = target_action.tolist()
                 record["target_camera_ypr"] = target_camera_ypr.tolist()
                 record["target_base_xyz"] = clipped_base_T_ee[:3, 3].tolist()
                 record["target_gripper"] = target_gripper
                 record["target_gripper_delta_from_current"] = target_gripper - current_gripper
                 record["target_gripper_delta_from_policy_input"] = (
-                    target_gripper - float(current_ee_camera_ypr[6])
-                )
-
-                if q_ik is None:
-                    record["skip_reason"] = "ik_nonfinite"
-                    logger.write(record)
-                    print(f"[so100] step {step}: IK returned non-finite values; skipping")
-                    continue
-
-                solved_base_T_ee = kinematics.fk(q_ik)
-                ik_pos_error = safety.ik_position_error(solved_base_T_ee, clipped_base_T_ee)
-                record["ik_pos_error_m"] = ik_pos_error
-                record["q_ik"] = q_ik.tolist()
-                if ik_pos_error > safety.max_ik_pos_error_m:
-                    record["ik_warning"] = "ik_pos_error"
-                    if not dry_run:
-                        record["skip_reason"] = "ik_pos_error"
-                        logger.write(record)
-                        print(
-                            f"[so100] step {step}: IK pos error {ik_pos_error:.4f} m "
-                            f"> {safety.max_ik_pos_error_m:.4f} m; skipping"
-                        )
-                        continue
-
-                q_safe, gripper_safe = safety.clip_joint_target(
-                    q_current,
-                    q_ik,
-                    current_gripper,
-                    target_gripper,
-                )
-                _, gripper_clip_debug = safety.clip_gripper_target(
-                    current_gripper,
-                    target_gripper,
-                )
-                target_delta_xyz_m = float(
-                    np.linalg.norm(target_camera_ypr[:3] - current_ee_camera_ypr[:3])
-                )
-                raw_target_base_delta_xyz_m = float(
-                    np.linalg.norm(raw_target_base_xyz - current_base_xyz)
-                )
-                clipped_target_delta_xyz_m = float(
-                    np.linalg.norm(clipped_base_T_ee[:3, 3] - current_base_xyz)
-                )
-                target_pose_clip_delta_xyz_m = float(
-                    np.linalg.norm(clipped_base_T_ee[:3, 3] - raw_target_base_xyz)
+                    target_gripper - float(policy_state[-1])
                 )
                 max_joint_delta_deg = float(np.max(np.abs(q_safe - q_current)))
                 safe_low_margin, safe_high_margin, safe_min_margin = safety.joint_limit_margins(q_safe)
@@ -1602,6 +2039,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--conversion-metadata", default=DEFAULT_CONVERSION_METADATA)
     parser.add_argument("--urdf", default=DEFAULT_URDF)
     parser.add_argument("--target-frame-name", default="gripper_frame_link")
+    parser.add_argument(
+        "--action-representation",
+        choices=ACTION_REPRESENTATIONS,
+        default=ACTION_REPRESENTATION_CAMERA_YPR,
+        help=(
+            "Action/state representation expected by the checkpoint. "
+            "'camera_ypr' is the original EE camera-frame policy; 'base_ypr' "
+            "uses base-frame EE pose with actions_cartesian; 'joint' uses "
+            "observations.state.joint_pos and actions_joint, then sends predicted "
+            "joint targets directly after safety clipping."
+        ),
+    )
 
     parser.add_argument("--port", default=None, help="SO100 follower serial port.")
     parser.add_argument("--robot-id", default=DEFAULT_ROBOT_ID)
@@ -1677,7 +2126,8 @@ def parse_args() -> argparse.Namespace:
         default="pose",
         help=(
             "Dimensions to blend when --rollout-blend-steps is active. The default "
-            "'pose' blends xyz+ypr only and leaves gripper commands unchanged."
+            "'pose' blends xyz+ypr for camera_ypr/base_ypr or arm joints for "
+            "joint mode, and leaves gripper commands unchanged."
         ),
     )
     parser.add_argument(
